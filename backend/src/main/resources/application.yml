@@ -1,0 +1,68 @@
+spring:
+  # 本地密钥覆盖文件（已被 .gitignore 忽略，不入库）：application-local.yml
+  config:
+    import: optional:file:./application-local.yml
+  application:
+    name: agri-platform
+
+  # 数据源配置
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/agri_platform?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:}
+
+  # Jackson配置
+  jackson:
+    time-zone: GMT+8
+    date-format: yyyy-MM-dd HH:mm:ss
+    serialization:
+      write-dates-as-timestamps: false
+
+  # 文件上传配置
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 50MB
+
+# MyBatis Plus配置
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.agri.platform.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+# JWT配置
+jwt:
+  secret: ${JWT_SECRET:}
+  expiration: 86400000  # 24小时（毫秒）
+
+# 服务器配置
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+# Cloudflare Turnstile 人机验证（Secret Key 走环境变量注入，不写进文件）
+turnstile:
+  enabled: ${TURNSTILE_ENABLED:true}
+  secret-key: ${TURNSTILE_SECRET_KEY:}
+
+# 支付宝（沙箱）配置；私钥/公钥走 application-local.yml / 环境变量注入，不写死在此
+alipay:
+  app-id: ${ALIPAY_APP_ID:}
+  app-private-key: ${ALIPAY_APP_PRIVATE_KEY:}
+  alipay-public-key: ${ALIPAY_PUBLIC_KEY:}
+  gateway: ${ALIPAY_GATEWAY:https://openapi-sandbox.dl.alipaydev.com/gateway.do}
+  charset: utf-8
+  sign-type: RSA2
+  format: json
+  return-url: ${ALIPAY_RETURN_URL:http://localhost:3000/alipay-result}
+  notify-url: ${ALIPAY_NOTIFY_URL:}
