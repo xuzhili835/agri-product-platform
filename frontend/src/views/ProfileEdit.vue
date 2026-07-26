@@ -46,7 +46,7 @@
             </el-form-item>
 
             <el-form-item label="真实姓名" prop="realName">
-              <el-input v-model="userForm.realName" placeholder="请输入真实姓名" />
+              <el-input v-model="userForm.realName" disabled placeholder="注册后不可修改" />
             </el-form-item>
 
             <el-form-item label="邮箱" prop="email">

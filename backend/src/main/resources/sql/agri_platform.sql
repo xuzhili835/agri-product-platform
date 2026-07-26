@@ -355,12 +355,12 @@ INSERT INTO `tb_user` (`user_name`, `password`, `real_name`, `role`, `status`) V
 
 -- 插入测试农户账号（密码：123456）
 INSERT INTO `tb_user` (`user_name`, `password`, `real_name`, `phone`, `role`, `status`) VALUES
-('farmer01', '$2a$10$nJnOhRdK10BXg76ET3vafugVrU7vQdNAgWQmd2vyTehVlcaemty7', '张三', '13800138001', 'farmer', 1),
-('farmer02', '$2a$10$nJnOhRdK10BXg76ET3vafugVrU7vQdNAgWQmd2vyTehVlcaemty7', '李四', '13800138002', 'farmer', 1);
+('farmer01', '$2a$10$nJnOhRdK10BXg76ET3vafugVrU7vQdNAgWQmd2vyTehVlcaemty7', '李建国', '13800138001', 'farmer', 1),
+('farmer02', '$2a$10$nJnOhRdK10BXg76ET3vafugVrU7vQdNAgWQmd2vyTehVlcaemty7', '王桂芳', '13800138002', 'farmer', 1);
 
 -- 插入测试买家账号（密码：123456）
 INSERT INTO `tb_user` (`user_name`, `password`, `real_name`, `phone`, `role`, `status`) VALUES
-('buyer01', '$2a$10$nJnOhRdK10BXg76ET3vafugVrU7vQdNAgWQmd2vyTehVlcaemty7', '王五', '13800138005', 'buyer', 1);
+('buyer01', '$2a$10$nJnOhRdK10BXg76ET3vafugVrU7vQdNAgWQmd2vyTehVlcaemty7', '赵晓东', '13800138005', 'buyer', 1);
 
 -- 插入测试银行账号（密码：123456）
 INSERT INTO `tb_user` (`user_name`, `password`, `real_name`, `phone`, `role`, `status`) VALUES

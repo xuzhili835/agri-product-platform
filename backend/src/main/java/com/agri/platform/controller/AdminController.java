@@ -161,7 +161,7 @@ public class AdminController {
         }
         String oldRole = user.getRole();
 
-        if (request.getRealName() != null) user.setRealName(request.getRealName());
+        // 真实姓名不可修改（它作为 tb_product.own_name 等表的"发布方"快照被冗余存储，改名会造孤儿数据）
         if (request.getPhone() != null) user.setPhone(request.getPhone());
         if (request.getIdentityNum() != null) user.setIdentityNum(request.getIdentityNum());
         if (request.getAddress() != null) user.setAddress(request.getAddress());

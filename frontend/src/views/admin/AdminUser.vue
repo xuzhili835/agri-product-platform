@@ -83,7 +83,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="真实姓名" prop="realName">
-          <el-input v-model="form.realName" />
+          <el-input v-model="form.realName" :disabled="isEditing" placeholder="新增时填写，编辑后不可改" />
         </el-form-item>
         <el-form-item label="手机号" prop="phone">
           <el-input v-model="form.phone" />

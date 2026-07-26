@@ -118,9 +118,9 @@ public class UserController {
             }
 
             // 更新允许修改的字段
-            if (userInfo.getRealName() != null) {
-                user.setRealName(userInfo.getRealName());
-            }
+            // 注意：真实姓名（realName）不允许在此修改。它作为 tb_product.own_name 等表的"发布方"
+            // 快照被冗余存储，改名会造成孤儿数据（农户查不到自己的已发布、联系农户报"发布方不存在"等）。
+            // 注册时填写一次即永久锁定，如确需改名请直接改库。
             if (userInfo.getPhone() != null) {
                 user.setPhone(userInfo.getPhone());
             }
