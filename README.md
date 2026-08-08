@@ -40,14 +40,23 @@ CREATE DATABASE agri_platform DEFAULT CHARSET utf8mb4;
 导入初始结构与数据：`backend/src/main/resources/sql/agri_platform.sql`
 
 ### 2. 后端
-在 `backend/` 下新建 `application-local.yml`（已被 `.gitignore` 忽略、不会提交），填入**本机**密钥：
+在 `backend/` 下新建 `application-local.yml`（已被 `.gitignore` 忽略、不会提交），填入**本机**密钥。完整示例：
 ```yaml
 spring:
   datasource:
     password: 你的MySQL密码
 jwt:
   secret: 你的JWT密钥
+# 以下为可选：注册人机验证 / 在线支付需要，纯本地调试可不配
+turnstile:
+  enabled: true            # 本地不想配可设 false，跳过注册的人机验证
+  secret-key: 你的 Cloudflare Turnstile Secret Key
+alipay:
+  app-id: 你的支付宝沙箱 AppId
+  app-private-key: 你的应用私钥
+  alipay-public-key: 支付宝公钥
 ```
+> 数据库密码、JWT 密钥为必填；Turnstile / 支付宝密钥不配也能启动，但「注册」「在线支付」功能需要各自的密钥（Turnstile 在 Cloudflare 控制台申请；支付宝用沙箱商户号）。
 启动：
 ```bash
 cd backend
@@ -61,11 +70,3 @@ npm install
 npm run dev              # 默认 5173
 ```
 前端通过相对路径 `/api` 访问后端，开发时可用 Vite 代理或配合 Nginx。
-
-## 📸 界面截图
-
-（待补充）
-
-## 协议
-
-本项目暂未声明开源协议。
