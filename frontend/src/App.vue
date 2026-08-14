@@ -1,6 +1,7 @@
 <template>
   <div id="app">
     <router-view />
+    <AgentWidget />
   </div>
 </template>
 
@@ -9,6 +10,7 @@ import { onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { getUserInfo } from '@/api/user'
+import AgentWidget from '@/components/AgentWidget.vue'
 
 const router = useRouter()
 const userStore = useUserStore()

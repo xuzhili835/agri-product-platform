@@ -129,6 +129,95 @@ public class DatabaseMigrationRunner implements ApplicationRunner {
                 "VARCHAR(64) DEFAULT NULL COMMENT '该申请所对应产品的银行账号(userName)，用于银行间数据隔离'");
         backfillBankUserName();
 
+        // 2026-08-12：智能体(Agent)。会话/聊天历史/工具审计/全局开关/知识切块向量，全部幂等建表。
+        createTableIfNotExists("tb_agent_session",
+                "CREATE TABLE IF NOT EXISTS tb_agent_session ("
+                        + "session_id VARCHAR(64) NOT NULL COMMENT '会话ID(UUID)' PRIMARY KEY,"
+                        + "user_name VARCHAR(50) NOT NULL COMMENT '发起人 userName',"
+                        + "role VARCHAR(16) NOT NULL COMMENT '角色 farmer/buyer',"
+                        + "status TINYINT NOT NULL DEFAULT 1 COMMENT '1进行中 0已关闭',"
+                        + "create_time DATETIME DEFAULT CURRENT_TIMESTAMP,"
+                        + "last_active_time DATETIME DEFAULT CURRENT_TIMESTAMP,"
+                        + "INDEX idx_agent_session_user (user_name)"
+                        + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT 'agent会话'");
+
+        createTableIfNotExists("tb_agent_message",
+                "CREATE TABLE IF NOT EXISTS tb_agent_message ("
+                        + "id INT AUTO_INCREMENT PRIMARY KEY,"
+                        + "session_id VARCHAR(64) NOT NULL COMMENT '会话ID',"
+                        + "user_name VARCHAR(50) NOT NULL,"
+                        + "direction VARCHAR(16) NOT NULL COMMENT 'user/assistant',"
+                        + "content TEXT COMMENT '消息文本',"
+                        + "tool_event VARCHAR(500) DEFAULT NULL COMMENT '工具事件摘要JSON(如调用了query_credit)',"
+                        + "create_time DATETIME DEFAULT CURRENT_TIMESTAMP,"
+                        + "INDEX idx_agent_message_session (session_id, create_time)"
+                        + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT 'agent聊天历史(档2可见消息)'");
+
+        createTableIfNotExists("tb_agent_tool_log",
+                "CREATE TABLE IF NOT EXISTS tb_agent_tool_log ("
+                        + "id INT AUTO_INCREMENT PRIMARY KEY,"
+                        + "session_id VARCHAR(64) NOT NULL,"
+                        + "user_name VARCHAR(50) NOT NULL,"
+                        + "tool_name VARCHAR(64) NOT NULL,"
+                        + "arguments VARCHAR(2000) DEFAULT NULL COMMENT '入参JSON(脱敏后)',"
+                        + "result VARCHAR(2000) DEFAULT NULL COMMENT '结果JSON(脱敏后)',"
+                        + "status VARCHAR(16) NOT NULL COMMENT 'ok/error/pending/cancelled/timeout',"
+                        + "duration_ms INT DEFAULT NULL,"
+                        + "confirmed TINYINT DEFAULT 0 COMMENT '写操作是否经用户确认 0否1是',"
+                        + "create_time DATETIME DEFAULT CURRENT_TIMESTAMP,"
+                        + "INDEX idx_agent_tool_log_session (session_id)"
+                        + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT 'agent工具审计'");
+
+        createTableIfNotExists("tb_system_config",
+                "CREATE TABLE IF NOT EXISTS tb_system_config ("
+                        + "config_key VARCHAR(64) NOT NULL COMMENT '键' PRIMARY KEY,"
+                        + "config_value VARCHAR(500) DEFAULT NULL COMMENT '值',"
+                        + "update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                        + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '系统配置(如agent总开关)'");
+        // agent 总开关默认开启(幂等：仅在不存在时插入)
+        try {
+            Integer c = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM tb_system_config WHERE config_key = ?",
+                    Integer.class, "agent_enabled");
+            if (c != null && c == 0) {
+                jdbcTemplate.update(
+                        "INSERT INTO tb_system_config(config_key, config_value) VALUES(?, ?)",
+                        "agent_enabled", "true");
+            }
+        } catch (Exception e) {
+            log.warn("[DB迁移] agent开关默认值插入失败，已跳过：{}", e.getMessage());
+        }
+
+        createTableIfNotExists("tb_knowledge_chunk",
+                "CREATE TABLE IF NOT EXISTS tb_knowledge_chunk ("
+                        + "id INT AUTO_INCREMENT PRIMARY KEY,"
+                        + "knowledge_id INT NOT NULL COMMENT '来源文章 tb_knowledge.knowledge_id',"
+                        + "chunk_index INT NOT NULL COMMENT '块序号',"
+                        + "content TEXT NOT NULL COMMENT '切块文本',"
+                        + "embedding LONGBLOB COMMENT 'bge-m3 向量(1024维float序列化)',"
+                        + "role_scope VARCHAR(16) DEFAULT 'common' COMMENT '角色范围 farmer/buyer/common',"
+                        + "model VARCHAR(64) DEFAULT NULL,"
+                        + "create_time DATETIME DEFAULT CURRENT_TIMESTAMP,"
+                        + "INDEX idx_knowledge_chunk_kid (knowledge_id)"
+                        + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT '知识切块+向量'");
+
+        // 2026-08-12：agent 演示用知识种子(融资流程/补贴政策/操作指南)。幂等：按 title 不存在才插。
+        seedKnowledgeIfNotExists("融资申请流程指南",
+                "农户可在【融资大厅】查看各银行发布的融资套餐(含额度上限、利率、期限)。"
+                + "选择合适套餐后提交融资申请，填写融资金额、期限、申请原因、还款来源。"
+                + "如需提高通过率，可选择联合贷款人共同申请。提交后等待银行审批。"
+                + "注：信用分影响审批通过率，不影响额度上限；额度由银行套餐决定。",
+                "farmer");
+        seedKnowledgeIfNotExists("农业补贴政策摘要",
+                "种粮直补、农机购置补贴、设施农业补贴等可通过当地农业农村局申请。"
+                + "大棚种植一般可申请设施农业补贴。补贴不影响融资额度，但稳定的补贴收入"
+                + "有助于提升还款能力评估，间接提高融资匹配分。",
+                "farmer");
+        seedKnowledgeIfNotExists("平台买卖操作指南",
+                "农户在【我要卖货】发布商品(标明品类、价格、库存、图片)；买家在【市场】搜索下单，"
+                + "下单后联系农户确认发货与收货。交易全程留痕，可在【我的订单】查看。",
+                "common");
+
         log.info("[DB迁移] 完成。");
     }
 
@@ -205,6 +294,23 @@ public class DatabaseMigrationRunner implements ApplicationRunner {
         } catch (Exception e) {
             // 列未就绪或基础表缺失等情况，打印警告但不阻断启动
             log.warn("[DB迁移] 银行隔离回填失败，已跳过（不阻断启动）：{}", e.getMessage());
+        }
+    }
+
+    /** 幂等插入一篇 agent 知识种子文章：按 title 不存在才插入 tb_knowledge(status=1 发布)。 */
+    private void seedKnowledgeIfNotExists(String title, String content, String roleScope) {
+        try {
+            Integer c = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM tb_knowledge WHERE title = ?", Integer.class, title);
+            if (c != null && c == 0) {
+                jdbcTemplate.update(
+                        "INSERT INTO tb_knowledge(title, content, own_name, status, create_time, update_time) "
+                                + "VALUES(?, ?, ?, 1, NOW(), NOW())",
+                        title, content, "system");
+                log.info("[DB迁移] 种子知识已插入：{}", title);
+            }
+        } catch (Exception e) {
+            log.warn("[DB迁移] 种子知识插入失败({})，已跳过：{}", title, e.getMessage());
         }
     }
 }

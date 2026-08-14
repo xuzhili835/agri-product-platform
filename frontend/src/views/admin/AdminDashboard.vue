@@ -75,6 +75,23 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <el-card class="agent-toggle-card">
+      <div class="agent-toggle">
+        <div class="agent-toggle__info">
+          <el-icon :size="20" color="var(--color-primary)"><Service /></el-icon>
+          <div>
+            <div class="agent-toggle__title">AI 智能助手</div>
+            <div class="agent-toggle__desc">全局开关 — 关闭后农户/买家无法使用智能助手</div>
+          </div>
+        </div>
+        <el-switch
+          v-model="agentEnabled"
+          :loading="agentToggleLoading"
+          @change="handleToggleAgent"
+        />
+      </div>
+    </el-card>
   </div>
 </template>
 
@@ -82,8 +99,9 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Picture, Box, User, Coin, Avatar } from '@element-plus/icons-vue'
+import { Picture, Box, User, Coin, Avatar, Service } from '@element-plus/icons-vue'
 import { getAdminStats } from '@/api/admin'
+import { getAgentStatus, toggleAgent } from '@/api/agent'
 
 const router = useRouter()
 const loading = ref(false)
@@ -97,6 +115,7 @@ const stats = reactive({
 
 onMounted(async () => {
   await loadStats()
+  await loadAgentStatus()
 })
 
 const loadStats = async () => {
@@ -110,6 +129,32 @@ const loadStats = async () => {
     ElMessage.error('加载统计数据失败')
   } finally {
     loading.value = false
+  }
+}
+
+// ===== AI 助手开关 =====
+const agentEnabled = ref(false)
+const agentToggleLoading = ref(false)
+
+const loadAgentStatus = async () => {
+  try {
+    const res = await getAgentStatus()
+    agentEnabled.value = res.data.enabled
+  } catch (e) {
+    // 静默失败(不影响管理员面板其它功能)
+  }
+}
+
+const handleToggleAgent = async (val) => {
+  agentToggleLoading.value = true
+  try {
+    await toggleAgent(val)
+    ElMessage.success(val ? 'AI 助手已开启' : 'AI 助手已关闭')
+  } catch (e) {
+    agentEnabled.value = !val  // 回滚
+    ElMessage.error('操作失败')
+  } finally {
+    agentToggleLoading.value = false
   }
 }
 </script>
@@ -169,5 +214,30 @@ const loadStats = async () => {
 .menu-item span {
   font-size: 14px;
   color: #333;
+}
+
+/* AI 助手开关卡片 */
+.agent-toggle-card {
+  margin-bottom: 20px;
+}
+.agent-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.agent-toggle__info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.agent-toggle__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.agent-toggle__desc {
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
 }
 </style>

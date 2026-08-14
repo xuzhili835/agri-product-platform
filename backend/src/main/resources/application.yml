@@ -66,3 +66,13 @@ alipay:
   format: json
   return-url: ${ALIPAY_RETURN_URL:http://localhost:3000/alipay-result}
   notify-url: ${ALIPAY_NOTIFY_URL:}
+
+# 硅基流动（SiliconFlow）LLM 配置（api-key 走环境变量 / application-local.yml 注入，不写死在此）
+siliconflow:
+  api-key: ${SILICONFLOW_API_KEY:}
+  base-url: https://api.siliconflow.cn/v1
+  chat-model: Qwen/Qwen2.5-72B-Instruct
+  chat-model-fallback: Qwen/Qwen2.5-7B-Instruct
+  embed-model: BAAI/bge-m3
+  max-iterations: 6
+  pending-ttl-seconds: 300
