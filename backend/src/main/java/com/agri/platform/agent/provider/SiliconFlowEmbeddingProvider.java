@@ -1,5 +1,6 @@
 package com.agri.platform.agent.provider;
 
+import cn.hutool.core.util.StrUtil;
 import cn.hutool.http.HttpRequest;
 import cn.hutool.json.JSONArray;
 import cn.hutool.json.JSONObject;
@@ -23,6 +24,7 @@ public class SiliconFlowEmbeddingProvider implements EmbeddingProvider {
 
     @Override
     public List<float[]> embed(List<String> texts) {
+        if (texts == null || texts.isEmpty()) return new ArrayList<>();
         JSONObject body = new JSONObject();
         body.set("model", props.getEmbedModel());
         body.set("input", texts);
@@ -31,10 +33,14 @@ public class SiliconFlowEmbeddingProvider implements EmbeddingProvider {
                 .header("Authorization", "Bearer " + props.getApiKey())
                 .header("Content-Type", "application/json")
                 .body(body.toString())
-                .timeout(60000)
+                .timeout(20_000)   // 检索路径同步调用,不能占满 orchestrator 的 55s 总预算
                 .execute()
                 .body();
+        // 错误响应(无 data,如 {"code":..., "message":...})此前直接 NPE,调用侧只能看到 "[工具异常] null"
         JSONArray data = JSONUtil.parseObj(resp).getJSONArray("data");
+        if (data == null || data.isEmpty()) {
+            throw new RuntimeException("embedding 接口返回错误: " + StrUtil.maxLength(resp, 200));
+        }
         List<float[]> out = new ArrayList<>();
         for (Object o : data) {
             JSONArray arr = ((JSONObject) o).getJSONArray("embedding");

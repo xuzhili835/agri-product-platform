@@ -35,6 +35,18 @@ class SiliconFlowChatProviderTest {
     }
 
     @Test
+    void parseWeirdResponses_noMessage_noNpe() {
+        // 有 choices 但 message 缺失/为 null 的怪响应:返回空文本而不是 NPE
+        // (NPE 会把整个 chat 打成 500,且不走 fallback——"静默空 reply"修复的同族漏网)
+        ChatResponse r1 = p.parseResponse("{\"choices\":[{}]}");
+        assertNotNull(r1);
+        assertTrue(r1.getText() == null || r1.getText().isEmpty());
+        ChatResponse r2 = p.parseResponse("{\"choices\":[{\"message\":null}]}");
+        assertNotNull(r2);
+        assertTrue(r2.getText() == null || r2.getText().isEmpty());
+    }
+
+    @Test
     void buildBodyContainsTools() {
         ToolSpec t = ToolSpec.builder().name("query_credit")
                 .description("查信用分").parameters(Map.of("userName", "string")).build();

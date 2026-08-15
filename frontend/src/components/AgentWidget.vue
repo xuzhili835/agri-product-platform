@@ -1,9 +1,12 @@
 <template>
-  <!-- 浮动按钮(仅 farmer/buyer 且已登录时显示) -->
+  <!-- 浮动按钮(仅 farmer/buyer 且已登录时显示),可拖动 -->
   <div
     v-if="shouldShow"
+    ref="fabEl"
     class="agent-fab"
     :class="{ 'agent-fab--open': isOpen }"
+    :style="fabStyle"
+    @pointerdown="startDrag($event, 'fab')"
     @click="togglePanel"
   >
     <el-icon :size="24">
@@ -12,16 +15,16 @@
     </el-icon>
   </div>
 
-  <!-- 聊天面板 -->
+  <!-- 聊天面板,按住头部可拖动 -->
   <transition name="agent-slide">
-    <div v-if="shouldShow && isOpen" class="agent-panel">
+    <div v-if="shouldShow && isOpen" ref="panelEl" class="agent-panel" :style="panelStyle">
       <!-- 头部 -->
-      <div class="agent-header">
+      <div class="agent-header" @pointerdown="startDrag($event, 'panel')">
         <div class="agent-header__title">
           <el-icon :size="18"><Service /></el-icon>
           <span>智能助手</span>
         </div>
-        <el-icon class="agent-header__close" :size="18" @click="isOpen = false">
+        <el-icon class="agent-header__close" :size="18" @pointerdown.stop @click="isOpen = false">
           <Close />
         </el-icon>
       </div>
@@ -47,18 +50,22 @@
               <el-button
                 type="primary"
                 size="small"
-                :loading="confirming"
+                :loading="msg.confirming"
                 @click="handleConfirm(msg, true)"
               >确认执行</el-button>
               <el-button
                 size="small"
-                :loading="confirming"
+                :loading="msg.confirming"
                 @click="handleConfirm(msg, false)"
               >取消</el-button>
             </div>
             <!-- 已处理标记 -->
             <div v-if="msg.needsConfirm && msg.resolved" class="agent-confirm__done">
               {{ msg.resolvedText }}
+            </div>
+            <!-- 恢复的旧确认卡时效提示 -->
+            <div v-if="msg.needsConfirm && !msg.resolved && msg.expired" class="agent-confirm__hint">
+              刷新前待确认的操作(5 分钟内有效,超时请重新发起)
             </div>
           </div>
 
@@ -76,13 +83,13 @@
         </div>
       </div>
 
-      <!-- 输入区 -->
+      <!-- 输入区(有待确认卡时不锁输入:发新消息会作废旧卡并提示,由后端保证) -->
       <div class="agent-input" v-if="agentEnabled">
         <el-input
           v-model="inputText"
           placeholder="输入消息,按 Enter 发送"
-          :disabled="loading || confirming"
-          @keyup.enter="handleSend"
+          :disabled="loading"
+          @keydown.enter="onEnterKey"
         />
         <el-button
           type="primary"
@@ -97,7 +104,7 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, watch } from 'vue'
+import { ref, reactive, computed, nextTick, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   ChatDotRound, Close, Service, Loading,
@@ -120,8 +127,71 @@ const sessionId = ref(localStorage.getItem('agent_session_id') || '')
 const messages = ref([])
 const inputText = ref('')
 const loading = ref(false)
-const confirming = ref(false)
 const messagesEl = ref(null)
+
+/** Enter 发送(过滤输入法组合键:中文输入法选词的回车不应发送) */
+function onEnterKey(e) {
+  if (e.isComposing || e.keyCode === 229) return
+  handleSend()
+}
+
+// ===== 拖动(浮窗按钮 + 面板头部) =====
+const fabEl = ref(null)
+const panelEl = ref(null)
+const fabPos = ref(null)    // 首次拖动后才启用 left/top 定位,之前用 CSS 默认角落
+const panelPos = ref(null)
+const drag = reactive({ active: false, moved: false, startX: 0, startY: 0, origX: 0, origY: 0, target: null })
+
+const fabStyle = computed(() => fabPos.value
+  ? { left: fabPos.value.x + 'px', top: fabPos.value.y + 'px', right: 'auto', bottom: 'auto' }
+  : null)
+const panelStyle = computed(() => panelPos.value
+  ? { left: panelPos.value.x + 'px', top: panelPos.value.y + 'px', right: 'auto', bottom: 'auto' }
+  : null)
+
+function startDrag(e, target) {
+  const el = target === 'fab' ? fabEl.value : panelEl.value
+  if (!el || !e.clientX) return
+  const rect = el.getBoundingClientRect()
+  drag.active = true
+  drag.moved = false
+  drag.target = target
+  drag.startX = e.clientX
+  drag.startY = e.clientY
+  drag.origX = rect.left
+  drag.origY = rect.top
+  window.addEventListener('pointermove', onDragMove)
+  window.addEventListener('pointerup', endDrag)
+}
+
+function onDragMove(e) {
+  if (!drag.active) return
+  const dx = e.clientX - drag.startX
+  const dy = e.clientY - drag.startY
+  // 位移小于 3px 视为点击,不进入拖动
+  if (!drag.moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) return
+  drag.moved = true
+  const pos = clampPos(drag.origX + dx, drag.origY + dy, drag.target)
+  if (drag.target === 'fab') fabPos.value = pos
+  else panelPos.value = pos
+}
+
+function endDrag() {
+  drag.active = false
+  drag.target = null
+  window.removeEventListener('pointermove', onDragMove)
+  window.removeEventListener('pointerup', endDrag)
+}
+
+/** 拖动范围限制在视口内 */
+function clampPos(x, y, target) {
+  const el = target === 'fab' ? fabEl.value : panelEl.value
+  const w = el ? el.offsetWidth : 0
+  const h = el ? el.offsetHeight : 0
+  const maxX = Math.max(0, window.innerWidth - w)
+  const maxY = Math.max(0, window.innerHeight - h)
+  return { x: Math.min(Math.max(x, 0), maxX), y: Math.min(Math.max(y, 0), maxY) }
+}
 
 // ===== 方法 =====
 
@@ -130,13 +200,27 @@ async function loadHistory() {
   try {
     const res = await getAgentHistory(sessionId.value)
     if (res.data && Array.isArray(res.data)) {
-      messages.value = res.data.map(m => ({
-        role: m.direction,
-        content: m.content,
-        needsConfirm: false,
-        pendingId: null,
-        resolved: true
-      }))
+      // 从 toolEvent("confirm:<pendingId>")里恢复未决确认卡——但只恢复最后一张:
+      // 更早的 pending 已被后端作废(同 session 挂新 pending 时清除),点了也只能拿到超时
+      let lastConfirmIdx = -1
+      const list = res.data.map((m, i) => {
+        const pendingId = m.toolEvent && m.toolEvent.startsWith('confirm:')
+          ? m.toolEvent.slice('confirm:'.length)
+          : null
+        if (pendingId) lastConfirmIdx = i
+        return {
+          role: m.direction,
+          content: m.content,
+          needsConfirm: !!pendingId,
+          pendingId,
+          resolved: true
+        }
+      })
+      if (lastConfirmIdx >= 0) {
+        list[lastConfirmIdx].resolved = false
+        list[lastConfirmIdx].expired = true   // 刷新回来的卡大概率已过期,文案提示 5 分钟时效
+      }
+      messages.value = list
       scrollToBottom()
     }
   } catch (e) {
@@ -148,6 +232,11 @@ async function loadHistory() {
 
 /** 切换面板开关 */
 async function togglePanel() {
+  // 刚发生拖动时不算点击,避免拖完误开关面板
+  if (drag.moved) {
+    drag.moved = false
+    return
+  }
   isOpen.value = !isOpen.value
   if (!isOpen.value) return
   // 每次打开都查状态(admin 可能在后台切了开关)
@@ -155,7 +244,7 @@ async function togglePanel() {
     const res = await getAgentStatus()
     agentEnabled.value = res.data.enabled
   } catch (e) {
-    agentEnabled.value = false
+    // 查询失败(网络抖动)不代表已停用:保持可用,后续 chat 失败会给出真实错误
   }
   // 首次打开加载历史(只在 messages 为空时)
   if (messages.value.length === 0 && agentEnabled.value && sessionId.value) {
@@ -186,6 +275,14 @@ async function handleSend() {
       sessionId.value = d.sessionId
       localStorage.setItem('agent_session_id', d.sessionId)
     }
+    // 同一会话任何时刻至多一张有效确认卡:新一轮对话已让后端作废旧 pending,
+    // 旧的未决卡统一标记失效,避免之后误点旧卡(点了也只会超时,但界面先说清)
+    messages.value.forEach(m => {
+      if (m.needsConfirm && !m.resolved) {
+        m.resolved = true
+        m.resolvedText = '已失效(发起了新请求)'
+      }
+    })
     // 追加助手消息
     messages.value.push({
       role: 'assistant',
@@ -206,17 +303,28 @@ async function handleSend() {
   }
 }
 
+/** 后端 confirm 状态 → 确认卡结果文案。只有 executed 才是"已执行"。 */
+const CONFIRM_STATUS_TEXT = {
+  executed: '✅ 已执行',
+  cancelled: '已取消',
+  timeout: '⏰ 已超时,请重新发起',
+  rejected: '⚠️ 无权确认该操作',
+  error: '❌ 执行失败,请查看下方原因',
+  disabled: '智能助手已停用,操作未执行'
+}
+
 /** 确认/取消写操作 */
 async function handleConfirm(msg, accept) {
-  confirming.value = true
+  msg.confirming = true
   try {
     const res = await agentConfirm({
       pendingId: msg.pendingId,
       accept: accept,
       sessionId: sessionId.value
     })
+    const status = res.data.status || (res.data.success ? 'executed' : 'error')
     msg.resolved = true
-    msg.resolvedText = accept ? '✅ 已执行' : '❌ 已取消'
+    msg.resolvedText = CONFIRM_STATUS_TEXT[status] || ('操作结束:' + status)
     // 追加执行结果消息
     messages.value.push({
       role: 'assistant',
@@ -226,7 +334,7 @@ async function handleConfirm(msg, accept) {
   } catch (e) {
     ElMessage.error('确认失败:' + (e.message || '请重试'))
   } finally {
-    confirming.value = false
+    msg.confirming = false
     scrollToBottom()
   }
 }
@@ -265,9 +373,11 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  cursor: pointer;
+  cursor: grab;
   box-shadow: var(--shadow-lg);
   z-index: 9998;
+  cursor: grab;
+  touch-action: none;   /* 触屏拖动时不滚动页面 */
   transition: transform var(--transition-fast), box-shadow var(--transition-fast);
 }
 .agent-fab:hover {
@@ -294,7 +404,7 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
   overflow: hidden;
 }
 
-/* 头部 */
+/* 头部(可拖动) */
 .agent-header {
   display: flex;
   align-items: center;
@@ -302,6 +412,9 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
   padding: var(--spacing-3) var(--spacing-4);
   background: linear-gradient(135deg, var(--color-primary), var(--color-primary-light));
   color: #fff;
+  cursor: grab;
+  user-select: none;      /* 拖动时不选中文本 */
+  touch-action: none;     /* 触屏拖动时不滚动页面 */
 }
 .agent-header__title {
   display: flex;
@@ -382,6 +495,10 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
   padding: var(--spacing-1) 0;
 }
 .agent-confirm__done {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+}
+.agent-confirm__hint {
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
 }

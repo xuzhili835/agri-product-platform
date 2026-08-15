@@ -3,6 +3,7 @@ package com.agri.platform.agent.tool.impl;
 import com.agri.platform.agent.dto.ToolSpec;
 import com.agri.platform.agent.tool.Tool;
 import com.agri.platform.agent.tool.ToolContext;
+import com.agri.platform.agent.util.Args;
 import com.agri.platform.agent.util.PiiMasker;
 import com.agri.platform.entity.Product;
 import com.agri.platform.service.ProductService;
@@ -24,16 +25,18 @@ public class SearchMarketTool implements Tool {
     public boolean isWrite() { return false; }
     public ToolSpec spec() {
         return ToolSpec.builder().name(name())
-                .description("搜索市场行情/商品比价。参数:keyword(品类或商品名,可选)。")
+                .description("搜索市场行情/商品比价,返回 商品#编号+[供应/求购]+标题+价格+卖家。下单只能买[供应]商品,下单时必须把返回的真实商品编号传给 place_order。参数:keyword(品类或商品名,可选)。")
                 .parameters(Map.of("keyword", "string")).build();
     }
     public String previewOrExecute(ToolContext ctx, Map<String, Object> args) {
-        String keyword = args.getOrDefault("keyword", "").toString();
-        Page<Product> p = productService.getProductPage(1, 10, "goods", keyword);
+        String keyword = Args.str(args.get("keyword"));
+        // 不按 type 过滤:此前硬编码 "goods",农户发布的求购(demand)信息永远搜不到
+        Page<Product> p = productService.getProductPage(1, 10, null, keyword == null ? "" : keyword);
         List<Product> list = p.getRecords();
         if (list == null || list.isEmpty()) return "未搜到相关商品";
         return masker.mask(list.stream()
-                .map(pr -> pr.getTitle() + " ¥" + pr.getPrice() + " 卖家:" + pr.getOwnName())
+                .map(pr -> "商品#" + pr.getOrderId() + " " + ("demand".equals(pr.getType()) ? "[求购]" : "[供应]")
+                        + " " + pr.getTitle() + " ¥" + pr.getPrice() + " 卖家:" + pr.getOwnName())
                 .collect(Collectors.joining("\n")));
     }
     public String execute(ToolContext ctx, Map<String, Object> args) { throw new UnsupportedOperationException(); }

@@ -33,12 +33,27 @@ public class AgentController {
     private final UserService userService;
 
     private static final String SYSTEM_PROMPT =
-            "你是农融汇平台的智能助手,服务农户和买家。规则:\n"
-            + "1) 只能用提供的工具获取数据或发起操作,禁止编造额度/利率/价格等。\n"
-            + "2) 信用分只影响审批通过率,不影响额度(额度由银行套餐决定)。\n"
-            + "3) 涉及写操作(融资申请/预约/下单)必须先调用对应工具生成预览,由用户确认。\n"
-            + "4) 不清楚或无数据时如实说'暂无该数据',不要编。\n"
-            + "5) 用中文简洁回答。";
+            "你是农融汇平台的智能助手。严格遵守以下规则:\n"
+            + "1) 所有数据(价格/额度/利率/商品编号/专家名单)只能来自工具返回,禁止凭空编造。\n"
+            + "2) 用户请求超出当前可用工具范围时,如实告知无法办理并简要说明原因,禁止用文字虚构交易流程或执行结果。\n"
+            + "3) 写操作(下单/预约/融资申请)只能通过调用对应工具发起,由用户点'确认执行'后才真正生效。"
+            + "未调用工具时,禁止声称'已下单/已预约/已确认'等任何执行结果。\n"
+            + "4) 下单前必须先用 search_market 查到真实商品编号,并把工具返回的真实编号传给 place_order,禁止自己编编号;"
+            + "用户说'默认地址'时,address 参数原样传'默认地址'即可,系统会自动替换为买家的默认收货地址。\n"
+            + "5) 预约专家前必须先用 list_experts 查真实专家账号,reserve_expert 的 expertName 必须用返回的账号,禁止编造。\n"
+            + "6) 信用分只影响审批通过率,不影响额度(额度由银行套餐决定)。\n"
+            + "7) 不清楚或工具未返回数据时,如实说'暂无该数据',不要编。\n"
+            + "8) 用中文简洁回答,语气平实,禁止装饰符号(如✿、【】)、表情符号和角色扮演式输出。";
+
+    /** 在通用规则后追加当前角色的能力边界:模型对越权请求(如农户要求下单)直接说明,而非编造流程。 */
+    private static String systemPromptFor(String role) {
+        String caps = "farmer".equals(role)
+                ? "当前用户是农户。可用:查信用分、查融资套餐、查融资通过前景、申请融资、查/预约专家、查市场行情、查知识库。"
+                  + "下单购买是买家功能,当前没有下单工具;用户要求下单时,直接说明农户账号无法下单。"
+                : "当前用户是买家。可用:查市场行情、查知识库、下单购买商品。"
+                  + "申请融资和预约专家是农户功能,当前没有相应工具;用户要求时,直接说明买家账号无法办理。";
+        return SYSTEM_PROMPT + "\n\n" + caps;
+    }
 
     /** 总开关状态(前端小精灵挂载先查)。 */
     @GetMapping("/status")
@@ -61,19 +76,27 @@ public class AgentController {
         if (!systemConfigService.agentEnabled()) {
             return Result.error("智能助手已停用");
         }
+        // 入口校验:空 message 会以"无 content 的 user 消息"打到硅基 API 触发 400(与 bridge 消息 400 同族);
+        // 超长 message 既拖慢 LLM 也可能超出模型上下文
+        if (req.getMessage() == null || req.getMessage().isBlank()) {
+            return Result.error("消息内容不能为空");
+        }
+        if (req.getMessage().length() > 2000) {
+            return Result.error("消息过长,请精简后重试(最多2000字)");
+        }
         var session = sessionService.getOrCreate(u.getUserName(), u.getRole(), req.getSessionId());
 
         // 构造上下文:system + 最近 N 轮 + 本轮 user
         List<ChatMessage> msgs = new ArrayList<>();
-        msgs.add(new ChatMessage("system", SYSTEM_PROMPT, null, null));
+        msgs.add(new ChatMessage("system", systemPromptFor(u.getRole()), null, null));
         msgs.addAll(messageService.recentAsChat(session.getSessionId(), 6));   // 滑窗 6 轮
         msgs.add(new ChatMessage("user", req.getMessage(), null, null));
 
         OrchestratorResult out = orchestrator.run(msgs, u.getRole(), u.getUserName(), session.getSessionId());
 
-        // 持久化可见消息(档2)
+        // 持久化可见消息(档2)。前缀不加装饰符号(system prompt 第8条自己先遵守)
         messageService.save(session.getSessionId(), u.getUserName(), "user", req.getMessage(), null);
-        String assistantText = out.needsConfirm() ? ("🔧 待确认操作:\n" + out.getDraft()) : out.getFinalText();
+        String assistantText = out.needsConfirm() ? ("待确认操作:\n" + out.getDraft()) : out.getFinalText();
         messageService.save(session.getSessionId(), u.getUserName(), "assistant", assistantText,
                 out.needsConfirm() ? "confirm:" + out.getPendingId() : null);
 
@@ -88,29 +111,50 @@ public class AgentController {
         return Result.success(resp);
     }
 
-    /** 确认/取消写操作。 */
+    /**
+     * 确认/取消写操作。响应含结构化 status(executed/cancelled/timeout/rejected/error/disabled),
+     * 前端据此渲染真实结果——此前只回文本,超时/异常也被前端显示成"已执行"。
+     */
     @PostMapping("/confirm")
     public Result<Map<String, Object>> confirm(@RequestHeader("Authorization") String token,
                                                @RequestBody ConfirmRequest req) {
         User u = currentUser(token);
         long t0 = System.currentTimeMillis();
-        String result = orchestrator.confirmAndExecute(req.getPendingId(), req.isAccept());
+        ConfirmOutcome outcome;
+        if (!systemConfigService.agentEnabled()) {
+            // 开关关闭时不再执行已挂起的写操作(pending 保留至超时,不消费)
+            outcome = ConfirmOutcome.of(ConfirmOutcome.DISABLED, "智能助手已停用,该操作未执行");
+        } else {
+            outcome = orchestrator.confirmAndExecute(req.getPendingId(), req.isAccept(), u.getUserName());
+        }
         String sessionId = req.getSessionId();
+        // 历史只写进属于当前用户的会话:pendingId 属主过了,但 sessionId 是前端另传的,
+        // 不校验就能把"确认/结果"消息写进他人会话(污染对方历史)
+        if (sessionId != null && sessionService.getOwned(sessionId, u.getUserName()) == null) {
+            sessionId = null;
+        }
         if (sessionId != null) {
             messageService.save(sessionId, u.getUserName(), "user", req.isAccept() ? "确认" : "取消", null);
-            messageService.save(sessionId, u.getUserName(), "assistant", result, null);
+            messageService.save(sessionId, u.getUserName(), "assistant", outcome.getText(), null);
         }
-        toolLogService.log(sessionId, u.getUserName(), "write-tool", null, result, req.isAccept() ? "ok" : "cancelled",
-                (int)(System.currentTimeMillis() - t0), req.isAccept());
+        String logStatus = ConfirmOutcome.EXECUTED.equals(outcome.getStatus()) ? "ok" : outcome.getStatus();
+        toolLogService.log(sessionId, u.getUserName(), "write-tool", null, outcome.getText(), logStatus,
+                (int)(System.currentTimeMillis() - t0), outcome.isExecuted());
         Map<String, Object> resp = new HashMap<>();
-        resp.put("reply", result);
+        resp.put("reply", outcome.getText());
+        resp.put("status", outcome.getStatus());
+        resp.put("success", outcome.isExecuted());
         return Result.success(resp);
     }
 
-    /** 历史消息(档2 回看)。 */
+    /** 历史消息(档2 回看)。仅会话属主可读,防跨用户读取他人对话(含确认卡里的联系方式/地址)。 */
     @GetMapping("/history/{sessionId}")
     public Result<List<AgentMessage>> history(@RequestHeader("Authorization") String token,
                                               @PathVariable String sessionId) {
+        User u = currentUser(token);
+        if (sessionService.getOwned(sessionId, u.getUserName()) == null) {
+            return Result.error("会话不存在或无权访问");
+        }
         return Result.success(messageService.history(sessionId));
     }
 

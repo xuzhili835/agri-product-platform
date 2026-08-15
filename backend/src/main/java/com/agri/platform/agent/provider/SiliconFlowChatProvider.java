@@ -31,20 +31,35 @@ public class SiliconFlowChatProvider implements ChatProvider {
             return fallbackOrGraceful(messages, tools, model);
         }
         // 先检视原始响应,识别 API 错误(无 choices,如 {"code":30003,"message":"Model disabled."})
-        JSONObject json = JSONUtil.parseObj(resp);
+        JSONObject json;
+        try {
+            json = JSONUtil.parseObj(resp);
+        } catch (Exception e) {
+            log.warn("[硅基chat] 模型 {} 响应非 JSON: {}", model, StrUtil.maxLength(resp, 200));
+            return fallbackOrGraceful(messages, tools, model);
+        }
         JSONArray choices = json.getJSONArray("choices");
         if (choices == null || choices.isEmpty()) {
             String errMsg = json.getStr("message");
             log.warn("[硅基chat] 模型 {} 返回错误: {}", model, errMsg != null ? errMsg : StrUtil.maxLength(resp, 200));
             return fallbackOrGraceful(messages, tools, model);
         }
-        // 成功路径:choices 存在,走原有解析逻辑
-        log.debug("[硅基chat] resp={}", StrUtil.maxLength(resp, 500));
-        return parseResponse(resp);
+        // 成功路径:choices 存在,走解析逻辑。解析异常(如有 choices 无 message 的怪响应)
+        // 同样走 fallback——此前直接 NPE 到 500,是"静默空 reply"修复的同族漏网
+        try {
+            log.debug("[硅基chat] resp={}", StrUtil.maxLength(resp, 500));
+            return parseResponse(resp);
+        } catch (Exception e) {
+            log.warn("[硅基chat] 模型 {} 响应解析异常: {}", model, e.getMessage());
+            return fallbackOrGraceful(messages, tools, model);
+        }
     }
 
     /**
      * 执行 HTTP 调用(私有,便于 chat() 包裹 try/catch 并检视原始响应)。
+     * timeout 25s:orchestrator 总预算 55s(deadline),单次请求最长可能连跑两次
+     * (主模型 25s 超时 + fallback 25s),50s 仍留在预算内;若单次 40s×2=80s 则必击穿预算,
+     * 前端 60s 先超时、后端仍在跑并落库 → 用户重试产生重复消息/重复 pending。
      */
     private String doRequest(List<ChatMessage> messages, List<ToolSpec> tools, String model) {
         String body = buildRequestBody(messages, tools, model);
@@ -52,7 +67,7 @@ public class SiliconFlowChatProvider implements ChatProvider {
                 .header("Authorization", "Bearer " + props.getApiKey())
                 .header("Content-Type", "application/json")
                 .body(body)
-                .timeout(60000)
+                .timeout(25_000)
                 .execute()
                 .body();
     }
@@ -116,7 +131,7 @@ public class SiliconFlowChatProvider implements ChatProvider {
         return body.toString();
     }
 
-    /** 解析响应(包级可见便于单测)。 */
+    /** 解析响应(包级可见便于单测)。message 缺失/为空的怪响应返回空文本(由上层走 fallback)。 */
     ChatResponse parseResponse(String resp) {
         JSONObject json = JSONUtil.parseObj(resp);
         JSONArray choices = json.getJSONArray("choices");
@@ -126,6 +141,10 @@ public class SiliconFlowChatProvider implements ChatProvider {
             return out;
         }
         JSONObject msg = choices.getJSONObject(0).getJSONObject("message");
+        if (msg == null) {
+            out.setText("");
+            return out;
+        }
         out.setText(msg.getStr("content"));
         JSONArray tcs = msg.getJSONArray("tool_calls");
         if (tcs != null && !tcs.isEmpty()) {

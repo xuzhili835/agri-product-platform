@@ -2,7 +2,9 @@ package com.agri.platform.agent.core;
 
 import com.agri.platform.agent.tool.Tool;
 import com.agri.platform.agent.tool.ToolContext;
+import com.agri.platform.config.SiliconFlowProperties;
 import lombok.Data;
+import lombok.RequiredArgsConstructor;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -11,14 +13,16 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 写工具挂起态:存「工具+上下文+参数+draft」,等用户确认。内存态、5min 超时回收(档2)。
+ * 写工具挂起态:存「工具+上下文+参数+draft」,等用户确认。内存态、TTL(默认5min)超时回收(档2)。
  *
  * <p>线程安全:{@link ConcurrentHashMap} 单字段兜底;单个 Pending 写入后不修改(createdAt 等 final 语义),
  * 故 get 返回后读改无需额外锁。{@link #sweep()} 的 removeIf 由 ConcurrentHashMap 支持并发遍历。</p>
  *
- * <p>说明:本组件不负责确认态机的并发仲裁——同一 sessionId 只允许一个 pending,由编排层(Task 9)保证。</p>
+ * <p>说明:本组件不负责确认态机的并发仲裁——同一 sessionId 只允许一个 pending,
+ * 由编排层在挂起新 pending 前调 {@link #removeBySession(String)} 清旧保证。</p>
  */
 @Component
+@RequiredArgsConstructor
 public class PendingActionStore {
 
     @Data
@@ -33,6 +37,7 @@ public class PendingActionStore {
     }
 
     private final ConcurrentHashMap<String, Pending> map = new ConcurrentHashMap<>();
+    private final SiliconFlowProperties props;
 
     public Pending put(String sessionId, Tool tool, ToolContext ctx, Map<String, Object> args, String draft) {
         Pending p = new Pending();
@@ -61,12 +66,24 @@ public class PendingActionStore {
     }
 
     /**
-     * 每 60s 扫一次,清掉超过 5 分钟未确认的。{@link org.springframework.scheduling.annotation.EnableScheduling}
+     * 清掉该会话所有挂起 pending(编排层挂起新 pending 前调用)。
+     * 关闭"同一会话累积多张确认卡、顺序双确认都生效"的双写下单口子——
+     * 旧卡即使残留在前端,点确认时也只会拿到 timeout。
+     */
+    public void removeBySession(String sessionId) {
+        if (sessionId == null) return;
+        map.values().removeIf(p -> sessionId.equals(p.getSessionId()));
+    }
+
+    /**
+     * 每 60s 扫一次,清掉超过 TTL(pendingTtlSeconds,默认300s)未确认的。
+     * {@link org.springframework.scheduling.annotation.EnableScheduling}
      * 在 PlatformApplication 上启用;单测直接 new 本类不触发调度,行为由 put/get/remove 自验。
      */
     @Scheduled(fixedDelay = 60_000)
     public void sweep() {
         long now = System.currentTimeMillis();
-        map.entrySet().removeIf(e -> now - e.getValue().getCreatedAt() > 5 * 60_000L);
+        long ttlMs = props.getPendingTtlSeconds() * 1000L;
+        map.entrySet().removeIf(e -> now - e.getValue().getCreatedAt() > ttlMs);
     }
 }

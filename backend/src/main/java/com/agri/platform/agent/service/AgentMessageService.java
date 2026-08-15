@@ -26,8 +26,13 @@ public class AgentMessageService {
     }
 
     public List<AgentMessage> history(String sessionId) {
+        // 次级按 id 排序:create_time 是秒级精度,chat 里 user/assistant 连续插入常常同秒,
+        // 只按时间排序顺序不稳定——前端会显示"回答在提问前",recentAsChat 回灌也会把
+        // 上下文顺序打乱让模型困惑
         return mapper.selectList(new LambdaQueryWrapper<AgentMessage>()
-                .eq(AgentMessage::getSessionId, sessionId).orderByAsc(AgentMessage::getCreateTime));
+                .eq(AgentMessage::getSessionId, sessionId)
+                .orderByAsc(AgentMessage::getCreateTime)
+                .orderByAsc(AgentMessage::getId));
     }
 
     /** 给编排循环的上下文:把历史消息转成 ChatMessage(只取最近 N 轮=滑窗)。 */

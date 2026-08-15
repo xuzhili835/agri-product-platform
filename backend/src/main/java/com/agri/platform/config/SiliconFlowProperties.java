@@ -18,8 +18,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class SiliconFlowProperties {
     private String apiKey;
     private String baseUrl = "https://api.siliconflow.cn/v1";
-    private String chatModel = "Qwen/Qwen3-30B-A3B";
-    private String chatModelFallback = "Qwen/Qwen3-235B-A22B";
+    private String chatModel = "Qwen/Qwen2.5-72B-Instruct";
+    private String chatModelFallback = "Qwen/Qwen2.5-7B-Instruct";
     private String embedModel = "BAAI/bge-m3";
     /** 单次会话最大工具循环次数 */
     private int maxIterations = 6;

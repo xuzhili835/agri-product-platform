@@ -4,6 +4,7 @@ import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import com.agri.platform.agent.dto.ChatMessage;
 import com.agri.platform.agent.dto.ChatResponse;
+import com.agri.platform.agent.dto.ConfirmOutcome;
 import com.agri.platform.agent.dto.OrchestratorResult;
 import com.agri.platform.agent.dto.ToolCall;
 import com.agri.platform.agent.dto.ToolSpec;
@@ -24,11 +25,13 @@ import java.util.Map;
  * ReAct 编排循环。每轮:模型选答(无 tool_calls → 返回)或选工具;工具分读写:
  * <ul>
  *   <li>读工具:直接 previewOrExecute,异常文本作为 observation 回灌,模型续聊。</li>
- *   <li>写工具:只生成 draft,挂起到 {@link PendingActionStore},立即返回 pendingId 等用户确认。</li>
+ *   <li>写工具:只生成 draft,挂起到 {@link PendingActionStore},立即返回 pendingId 等用户确认。
+ *       挂起前先清掉同 session 的旧 pending——同一会话任何时刻至多一张有效确认卡,
+ *       杜绝"先问买苹果、再问买梨、两张卡都点"的顺序双写下单。</li>
  * </ul>
  * 用户确认后调 {@link #confirmAndExecute};该步做<strong>原子消费</strong>(remove 即返回 removed),
- * 杜绝并发确认的双写(双融资申请 / 双订单)。
- * <p>到达 {@code maxIterations} 仍无终稿时,返回固定"拆分问题"提示。</p>
+ * 杜绝并发确认的双写(双融资申请 / 双订单),并校验 pending 属主,防越权替他人确认。
+ * <p>到达 {@code maxIterations} 或总耗时超 {@code DEADLINE_MS} 仍无终稿时,返回固定提示。</p>
  */
 @Slf4j
 @Component
@@ -39,6 +42,13 @@ public class AgentOrchestrator {
     private final ToolRegistry toolRegistry;
     private final PendingActionStore pendingStore;
     private final SiliconFlowProperties props;
+
+    /**
+     * 单次 run 的总耗时预算。前端 agentChat 超时 60s,后端必须在此前返回,
+     * 否则前端报错后端却仍在跑并落库,用户重试造成重复消息/重复 pending。
+     * 最坏单轮 = chat 40s + fallback 40s 已逼近预算,deadline 在每轮 chat 前拦截。
+     */
+    static final long DEADLINE_MS = 55_000L;
 
     /**
      * 运行编排循环。
@@ -53,8 +63,15 @@ public class AgentOrchestrator {
         List<ToolSpec> tools = toolRegistry.specsForRole(role);
         ToolContext ctx = new ToolContext(userName, role, sessionId);
         int maxIter = props.getMaxIterations();
+        long deadline = System.currentTimeMillis() + DEADLINE_MS;
 
         for (int iter = 0; iter < maxIter; iter++) {
+            if (System.currentTimeMillis() > deadline) {
+                log.warn("[agent] run 超过 {}ms 预算,提前终止", DEADLINE_MS);
+                OrchestratorResult out = new OrchestratorResult();
+                out.setFinalText("抱歉,这次处理时间过长,请稍后重试或把问题拆分得更具体一些。");
+                return out;
+            }
             ChatResponse resp = chatProvider.chat(messages, tools, props.getChatModel());
             if (!resp.hasToolCalls()) {
                 OrchestratorResult out = new OrchestratorResult();
@@ -75,8 +92,18 @@ public class AgentOrchestrator {
                     continue;
                 }
                 if (tool.isWrite()) {
-                    // 生成 draft,挂起等确认,停止循环
-                    String draft = tool.previewOrExecute(ctx, args);
+                    // 生成 draft,挂起等确认,停止循环。预览抛异常(商品不存在/缺必填槽位等)
+                    // → 作为 observation 回灌,让模型追问补槽或重新检索,不挂起无效确认卡、不抛 500。
+                    String draft;
+                    try {
+                        draft = tool.previewOrExecute(ctx, args);
+                    } catch (Exception e) {
+                        log.warn("[agent] 写工具 {} 预览异常:{}", call.getName(), e.getMessage());
+                        messages.add(toolMsg(call.getId(), "[工具异常] " + e.getMessage()));
+                        continue;
+                    }
+                    // 同一会话至多一张有效确认卡:旧 pending 未消费则作废(前端旧卡再点只会拿到 timeout)
+                    pendingStore.removeBySession(sessionId);
                     PendingActionStore.Pending p = pendingStore.put(sessionId, tool, ctx, args, draft);
                     OrchestratorResult out = new OrchestratorResult();
                     out.setFinalText(draft);
@@ -102,19 +129,27 @@ public class AgentOrchestrator {
     }
 
     /**
-     * 用户确认 pending 后,执行写工具,返回结果文本(供 controller 再灌进上下文续聊)。
-     * <p><strong>原子消费</strong>:{@link PendingActionStore#remove(String)} 返回被移除的 Pending,
-     * 即"取走"语义。两个并发确认只有一个拿到非 null,另一个必得 null → 返回超时提示。
-     * 这关闭了原 get→remove→execute 三步流程的 TOCTOU 双写漏洞。</p>
+     * 用户确认 pending 后,执行写工具,返回结构化结果(供 controller 再灌进上下文续聊)。
+     * <p><strong>属主校验</strong>:pending 的 ctx.userName 必须等于当前登录用户,否则 rejected——
+     * 防止拿到他人 pendingId(如从历史消息泄露)后替他人确认下单/融资。校验用 get(不消费),
+     * 不影响原用户后续确认。</p>
+     * <p><strong>原子消费</strong>:属主校验通过后 {@link PendingActionStore#remove(String)} 取走。
+     * 两个并发确认只有一个拿到非 null,另一个必得 timeout——关闭 get→remove→execute 三步的 TOCTOU 双写。</p>
      */
-    public String confirmAndExecute(String pendingId, boolean accept) {
+    public ConfirmOutcome confirmAndExecute(String pendingId, boolean accept, String userName) {
+        PendingActionStore.Pending existing = pendingStore.get(pendingId);
+        if (existing != null && !existing.getCtx().getUserName().equals(userName)) {
+            log.warn("[agent] 用户 {} 试图确认不属于自己的 pending(属主:{})", userName, existing.getCtx().getUserName());
+            return ConfirmOutcome.of(ConfirmOutcome.REJECTED, "无权确认该操作");
+        }
         PendingActionStore.Pending p = pendingStore.remove(pendingId);   // atomic consume — closes the double-confirm race
-        if (p == null) return "该操作已超时或不存在,请重新发起";
-        if (!accept) return "已取消该操作";
+        if (p == null) return ConfirmOutcome.of(ConfirmOutcome.TIMEOUT, "该操作已超时或不存在,请重新发起");
+        if (!accept) return ConfirmOutcome.of(ConfirmOutcome.CANCELLED, "已取消该操作");
         try {
-            return p.getTool().execute(p.getCtx(), p.getArgs());
+            return ConfirmOutcome.of(ConfirmOutcome.EXECUTED, p.getTool().execute(p.getCtx(), p.getArgs()));
         } catch (Exception e) {
-            return "[执行异常] " + e.getMessage();
+            log.warn("[agent] 确认执行异常:{}", e.getMessage());
+            return ConfirmOutcome.of(ConfirmOutcome.ERROR, "[执行失败] " + e.getMessage());
         }
     }
 

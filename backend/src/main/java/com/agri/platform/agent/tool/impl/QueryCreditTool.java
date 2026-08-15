@@ -29,8 +29,10 @@ public class QueryCreditTool implements Tool {
     public String previewOrExecute(ToolContext ctx, Map<String, Object> args) {
         User u = userService.getUserByUserName(ctx.getUserName());
         if (u == null) return "未找到用户";
+        int credit = u.getCredit() == null ? 5 : u.getCredit();
+        int integral = u.getIntegral() == null ? 0 : u.getIntegral();
         String raw = StrUtil.format("用户:{} 信用分:{} 积分:{}",
-                u.getRealName(), u.getCredit(), u.getIntegral());
+                u.getRealName(), credit, integral);
         return masker.mask(raw);
     }
     public String execute(ToolContext ctx, Map<String, Object> args) {
