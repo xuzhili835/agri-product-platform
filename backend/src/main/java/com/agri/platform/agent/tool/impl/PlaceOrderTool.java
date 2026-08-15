@@ -2,6 +2,7 @@ package com.agri.platform.agent.tool.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.agri.platform.agent.dto.ToolSpec;
+import com.agri.platform.agent.tool.SearchedProductCache;
 import com.agri.platform.agent.tool.Tool;
 import com.agri.platform.agent.tool.ToolContext;
 import com.agri.platform.agent.util.Args;
@@ -37,6 +38,8 @@ public class PlaceOrderTool implements Tool {
     private final OrderService orderService;
     private final ProductMapper productMapper;
     private final AddressService addressService;
+    private final SearchedProductCache searchedCache;
+    private final SearchMarketTool searchMarketTool;
 
     public String name() { return "place_order"; }
 
@@ -46,8 +49,10 @@ public class PlaceOrderTool implements Tool {
 
     public ToolSpec spec() {
         return ToolSpec.builder().name(name())
-                .description("下单购买商品(直接购买)。orderId 必须是 search_market 返回的真实商品编号;"
-                        + "count 为数量;address 为收货地址,用户说默认地址时原样传'默认地址'即可。需用户确认。")
+                .description("下单购买商品(直接购买)。用户已表达购买意向并给出商品和数量时立即调用本工具;"
+                        + "调用后系统会自动向用户展示确认卡,不需要你等待用户口头确认,也不要在文字里说'现在为您下单'之类的话。"
+                        + "orderId 必须是本次会话 search_market 返回或在售列表中的真实商品编号;订单号不是商品编号。"
+                        + "count 为数量;address 为收货地址,用户说默认地址时原样传默认地址即可。")
                 .parameters(Map.of(
                         "orderId", "integer",
                         "count", "integer",
@@ -62,6 +67,20 @@ public class PlaceOrderTool implements Tool {
         if (count == null || count <= 0) throw new RuntimeException("购买数量必须大于0");
         // 数量上限:submitOrder 无库存概念也不限数量,不设上限会落成 0.01 元商品 × 99999 的天价订单
         if (count > 999) throw new RuntimeException("单次购买数量不能超过999,如需更多请分批下单");
+        // 编号白名单:必须是本会话搜索结果——实测模型会跳过搜索编造编号(把历史"订单号:14"当商品编号),
+        // 编造编号要么撞错要么撞上用户根本不想买的商品。
+        // 未命中时按该编号反查标题做精准代搜:商品真实存在则必命中(空 keyword 全量搜索会被
+        // 分页/时间排序截断,目标商品可能不在前10),命中即放行——确认卡上用户还会亲眼核对
+        // 商品名/价格,双保险;商品不存在则退全量列表引导模型重新选择。
+        if (!searchedCache.contains(ctx.getSessionId(), orderId)) {
+            Product probe = productMapper.selectById(orderId);
+            String kw = probe == null || probe.getTitle() == null ? "" : probe.getTitle();
+            String listing = searchMarketTool.previewOrExecute(ctx, Map.of("keyword", kw));
+            if (!searchedCache.contains(ctx.getSessionId(), orderId)) {
+                throw new RuntimeException("商品#" + orderId + " 不存在或已下架(订单号不能当商品编号)。"
+                        + "请从以下在售商品中选择正确编号重新调用:\n" + listing);
+            }
+        }
         Product product = productMapper.selectById(orderId);
         if (product == null) throw new RuntimeException("商品#" + orderId + " 不存在或已下架,请用 search_market 重新选择");
         String address = resolveAddress(ctx, args);

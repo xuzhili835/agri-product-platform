@@ -6,6 +6,7 @@ import com.agri.platform.agent.tool.ToolContext;
 import com.agri.platform.agent.util.Args;
 import com.agri.platform.agent.util.PiiMasker;
 import com.agri.platform.entity.Product;
+import com.agri.platform.agent.tool.SearchedProductCache;
 import com.agri.platform.service.ProductService;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +21,7 @@ import java.util.stream.Collectors;
 public class SearchMarketTool implements Tool {
     private final ProductService productService;
     private final PiiMasker masker;
+    private final SearchedProductCache searchedCache;
     public String name() { return "search_market"; }
     public String role() { return "common"; }
     public boolean isWrite() { return false; }
@@ -34,6 +36,8 @@ public class SearchMarketTool implements Tool {
         Page<Product> p = productService.getProductPage(1, 10, null, keyword == null ? "" : keyword);
         List<Product> list = p.getRecords();
         if (list == null || list.isEmpty()) return "未搜到相关商品";
+        // 搜索结果编号记入会话白名单:place_order 只接受白名单编号,杜绝模型编造/混淆编号
+        list.forEach(pr -> searchedCache.record(ctx.getSessionId(), pr.getOrderId()));
         return masker.mask(list.stream()
                 .map(pr -> "商品#" + pr.getOrderId() + " " + ("demand".equals(pr.getType()) ? "[求购]" : "[供应]")
                         + " " + pr.getTitle() + " ¥" + pr.getPrice() + " 卖家:" + pr.getOwnName())

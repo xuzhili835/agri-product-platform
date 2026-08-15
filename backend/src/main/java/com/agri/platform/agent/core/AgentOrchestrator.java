@@ -20,6 +20,7 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * ReAct 编排循环。每轮:模型选答(无 tool_calls → 返回)或选工具;工具分读写:
@@ -32,11 +33,43 @@ import java.util.Map;
  * 用户确认后调 {@link #confirmAndExecute};该步做<strong>原子消费</strong>(remove 即返回 removed),
  * 杜绝并发确认的双写(双融资申请 / 双订单),并校验 pending 属主,防越权替他人确认。
  * <p>到达 {@code maxIterations} 或总耗时超 {@code DEADLINE_MS} 仍无终稿时,返回固定提示。</p>
+ * <p><strong>假执行拦截</strong>:实测发现模型会用纯文字模仿确认卡/执行结果格式
+ * ("待确认操作:…确认执行?" / "下单成功,订单号:14"),工具并未调用、什么都没落库,
+ * 用户却以为下单成功。prompt 约束会被违反,故在代码层对<strong>无工具调用轮</strong>的
+ * 终稿做话术检测,命中即替换为安全提示。</p>
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
 public class AgentOrchestrator {
+
+    /**
+     * 系统专用话术,模型在纯文字轮(未调任何工具)说出即判定为假执行:
+     * <ul>
+     *   <li>"待确认操作:"——确认卡 draft 的系统前缀,只会由本类拼装,模型说了必是模仿;</li>
+     *   <li>"即将下单/预约/提交融资 … 确认执行?"——写工具 preview 的固定句式;</li>
+     *   <li>"下单成功,订单号"/"预约已提交"/"融资申请已提交"——写工具 execute 的固定句式,
+     *       真结果只经 confirmAndExecute 返回,不会出现在 chat 终稿里。</li>
+     * </ul>
+     */
+    static final Pattern FAKE_EXECUTION = Pattern.compile(
+            "待确认操作|即将下单.*确认执行\\?|即将预约.*确认执行\\?|即将提交融资.*确认执行\\?"
+                    + "|下单成功[,，]订单号|预约已提交|融资申请已提交"
+                    // 将来时承诺:说了"现在为您下单"却没调工具——用户会等一张永远不会出现的确认卡
+                    + "|(现在|正在|马上)?为您(下单|购买|下单购买)|即将为您(下单|购买|预约|提交)", Pattern.DOTALL);
+
+    private static final String FAKE_EXECUTION_REPLY =
+            "抱歉,我刚才差点用文字冒充了执行结果,这是不允许的。您的请求其实还没有执行——"
+                    + "请把需求再对我说一遍(如:买一份攀枝花芒果,默认地址),我会调用工具并弹出真正的确认按钮。";
+
+    /** 拦截假话术后给模型的纠偏指令:给一次改正机会,多数模型会改调工具,用户无感。 */
+    private static final String FAKE_CORRECTION_PROMPT =
+            "你上一条回复包含伪造的确认卡或执行结果格式,已被系统拦截,用户没有看到。"
+                    + "确认卡与执行结果只能由系统工具产生,你不能用文字模拟。请重新回答本次问题:"
+                    + "需要执行写操作就必须调用对应工具(如 place_order),工具会生成真确认卡;"
+                    + "信息不足就用普通文字向用户追问;禁止输出'待确认操作'、'确认执行?'、"
+                    + "'下单成功/预约已提交/融资申请已提交'等系统专用格式文本。";
+
 
     private final ChatProvider chatProvider;
     private final ToolRegistry toolRegistry;
@@ -74,9 +107,34 @@ public class AgentOrchestrator {
             }
             ChatResponse resp = chatProvider.chat(messages, tools, props.getChatModel());
             if (!resp.hasToolCalls()) {
-                OrchestratorResult out = new OrchestratorResult();
-                out.setFinalText(resp.getText() == null ? "" : resp.getText());
-                return out;
+                String text = resp.getText() == null ? "" : resp.getText();
+                if (FAKE_EXECUTION.matcher(text).find()) {
+                    // 模型在未调工具的轮次用文字模仿系统格式(假确认卡/假执行结果)——拦截,
+                    // 否则用户以为已下单,实际什么都没发生(实测复现过编造"海南新鲜芒果¥35"的假卡)。
+                    // 拦截后带纠偏指令自动重试一轮:模型多数会改调工具,用户无感;
+                    // 重试仍违规才返回兜底文案。
+                    log.warn("[agent] 拦截假执行话术(纯文字轮),纠偏重试: {}", text.replaceAll("\n", " "));
+                    messages.add(new ChatMessage("assistant", text, null, null));
+                    messages.add(new ChatMessage("system", FAKE_CORRECTION_PROMPT, null, null));
+                    ChatResponse retry = chatProvider.chat(messages, tools, props.getChatModel());
+                    if (!retry.hasToolCalls()) {
+                        String t2 = retry.getText() == null ? "" : retry.getText();
+                        if (FAKE_EXECUTION.matcher(t2).find()) {
+                            log.warn("[agent] 纠偏重试仍输出假话术,返回兜底提示");
+                            OrchestratorResult out = new OrchestratorResult();
+                            out.setFinalText(FAKE_EXECUTION_REPLY);
+                            return out;
+                        }
+                        OrchestratorResult out = new OrchestratorResult();
+                        out.setFinalText(t2);
+                        return out;
+                    }
+                    resp = retry;   // 重试后愿意调工具了,接回主流程处理 tool_calls
+                } else {
+                    OrchestratorResult out = new OrchestratorResult();
+                    out.setFinalText(text);
+                    return out;
+                }
             }
             // 补回 assistant 桥接消息:OpenAI 兼容 API 要求 role=tool 消息前必须有带 tool_calls 的 assistant 消息,
             // 否则下一次 /chat/completions 返回 400。toolCallsJson 由 provider 序列化为 tool_calls。

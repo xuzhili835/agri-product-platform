@@ -295,4 +295,49 @@ class AgentOrchestratorTest {
         assertEquals(ConfirmOutcome.EXECUTED,
                 orch.confirmAndExecute(second.getPendingId(), true, "u1").getStatus());
     }
+
+    @Test
+    void fakeExecutionTextInPureTextTurnIsIntercepted() {
+        // 回归(实测事故):模型在未调工具的轮次用文字伪造确认卡/执行结果
+        // ("待确认操作:…确认执行?" / "下单成功,订单号:14"),用户以为下单了实际什么都没发生。
+        // 拦截后会带纠偏指令自动重试一轮:重试正常→透出重试文本;重试仍假→兜底文案
+        ScriptedProvider prov = new ScriptedProvider();
+        ChatResponse fake = new ChatResponse();
+        fake.setText("待确认操作:\n即将下单:海南新鲜芒果 ¥35.00 x 1 = ¥35.00\n收货地址:北京市西城区\n确认执行?");
+        prov.add(fake);
+        ChatResponse recovered = new ChatResponse();
+        recovered.setText("抱歉,刚才的回复有误。请问您想购买什么商品?我先搜索再给您确认按钮。");
+        prov.add(recovered);
+        AgentOrchestrator orch = new AgentOrchestrator(prov, new ToolRegistry(List.of()), null, props());
+        OrchestratorResult out = orch.run(List.of(new ChatMessage("user", "买芒果", null, null)), "buyer", "u1", "s1");
+        assertFalse(out.needsConfirm(), "纯文字轮不得产生 pendingId");
+        // 重试正常 → 透出重试文本(且纠偏消息确实发给了模型)
+        assertEquals("抱歉,刚才的回复有误。请问您想购买什么商品?我先搜索再给您确认按钮。", out.getFinalText());
+        assertEquals(2, prov.allCalls.size(), "拦截后应带纠偏指令重试一次");
+        assertTrue(prov.allCalls.get(1).stream().anyMatch(m -> "system".equals(m.getRole())
+                        && m.getContent() != null && m.getContent().contains("已被系统拦截")),
+                "重试请求里应包含纠偏 system 消息");
+
+        // 重试仍输出假话术 → 返回兜底文案,绝不透出伪造内容
+        ScriptedProvider prov2 = new ScriptedProvider();
+        ChatResponse fake2 = new ChatResponse();
+        fake2.setText("下单成功,订单号:14,合计:¥35.00。请在订单列表完成支付。");
+        prov2.add(fake2);
+        ChatResponse fake2Again = new ChatResponse();
+        fake2Again.setText("下单成功,订单号:15,合计:¥35.00。");
+        prov2.add(fake2Again);
+        AgentOrchestrator orch2 = new AgentOrchestrator(prov2, new ToolRegistry(List.of()), null, props());
+        OrchestratorResult out2 = orch2.run(List.of(new ChatMessage("user", "确认", null, null)), "buyer", "u1", "s1");
+        assertFalse(out2.getFinalText().contains("订单号:1"), "伪造的执行结果不得透出");
+
+        // 正常解释性文字不受误伤(无重试)
+        ScriptedProvider prov3 = new ScriptedProvider();
+        ChatResponse normal = new ChatResponse();
+        normal.setText("下单需要先搜索商品,选择后我会给您弹出确认按钮,点击确认才会真正提交订单。");
+        prov3.add(normal);
+        AgentOrchestrator orch3 = new AgentOrchestrator(prov3, new ToolRegistry(List.of()), null, props());
+        OrchestratorResult out3 = orch3.run(List.of(new ChatMessage("user", "怎么下单?", null, null)), "buyer", "u1", "s1");
+        assertEquals("下单需要先搜索商品,选择后我会给您弹出确认按钮,点击确认才会真正提交订单。", out3.getFinalText());
+        assertEquals(1, prov3.allCalls.size(), "正常文本不应触发重试");
+    }
 }

@@ -43,7 +43,10 @@ public class AgentController {
             + "5) 预约专家前必须先用 list_experts 查真实专家账号,reserve_expert 的 expertName 必须用返回的账号,禁止编造。\n"
             + "6) 信用分只影响审批通过率,不影响额度(额度由银行套餐决定)。\n"
             + "7) 不清楚或工具未返回数据时,如实说'暂无该数据',不要编。\n"
-            + "8) 用中文简洁回答,语气平实,禁止装饰符号(如✿、【】)、表情符号和角色扮演式输出。";
+            + "8) 用中文简洁回答,语气平实,禁止装饰符号(如✿、【】)、表情符号和角色扮演式输出。\n"
+            + "9) '待确认操作:…确认执行?'确认卡和'下单成功/预约已提交/融资申请已提交'执行结果只能由系统工具产生,"
+            + "你严禁在文字回复中模仿这些格式、伪造确认卡或声称任何执行结果——没弹出确认按钮的操作等于没有发生。\n"
+            + "10) 用户表示同意/确认时,若你还没有生成确认卡,必须先调用对应写工具生成真确认卡,而不是直接宣称完成。";
 
     /** 在通用规则后追加当前角色的能力边界:模型对越权请求(如农户要求下单)直接说明,而非编造流程。 */
     private static String systemPromptFor(String role) {
@@ -135,7 +138,8 @@ public class AgentController {
         }
         if (sessionId != null) {
             messageService.save(sessionId, u.getUserName(), "user", req.isAccept() ? "确认" : "取消", null);
-            messageService.save(sessionId, u.getUserName(), "assistant", outcome.getText(), null);
+            // tool-result 标记:recentAsChat 据此给模型加"系统注入的真实执行结果"标注,防其模仿伪造
+            messageService.save(sessionId, u.getUserName(), "assistant", outcome.getText(), "tool-result");
         }
         String logStatus = ConfirmOutcome.EXECUTED.equals(outcome.getStatus()) ? "ok" : outcome.getStatus();
         toolLogService.log(sessionId, u.getUserName(), "write-tool", null, outcome.getText(), logStatus,

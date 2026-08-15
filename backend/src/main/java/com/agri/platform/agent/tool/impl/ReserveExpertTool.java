@@ -50,7 +50,7 @@ public class ReserveExpertTool implements Tool {
                 .description("预约专家咨询。expertName 必须用 list_experts 返回的真实专家账号;"
                         + "preferredTime 期望时间(必填);plantName 农作物;soilCondition 土壤条件;"
                         + "plantCondition 作物当前状况;plantDetail 问题描述;message 留言(可选)。"
-                        + "缺少信息时先向农户追问补齐再调用。电话和地址系统自动取用户资料。需用户确认。")
+                        + "缺少信息时先向农户追问补齐;信息齐全时直接调用,无需先口头确认(确认由系统确认卡完成)。电话和地址系统自动取用户资料。")
                 .parameters(Map.of(
                         "expertName", "string",
                         "preferredTime", "string",
