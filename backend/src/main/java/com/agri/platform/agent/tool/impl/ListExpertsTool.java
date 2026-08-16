@@ -24,7 +24,7 @@ public class ListExpertsTool implements Tool {
 
     public String name() { return "list_experts"; }
 
-    public String role() { return "farmer"; }
+    public String role() { return "common"; }   // 业务层不限制角色,买家也可预约(此前误配为 farmer)
 
     public boolean isWrite() { return false; }
 

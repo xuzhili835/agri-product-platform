@@ -41,7 +41,7 @@ public class ReserveExpertTool implements Tool {
 
     public String name() { return "reserve_expert"; }
 
-    public String role() { return "farmer"; }
+    public String role() { return "common"; }   // 业务层不限制角色,买家也可预约(此前误配为 farmer)
 
     public boolean isWrite() { return true; }
 
@@ -49,8 +49,8 @@ public class ReserveExpertTool implements Tool {
         return ToolSpec.builder().name(name())
                 .description("预约专家咨询。expertName 必须用 list_experts 返回的真实专家账号;"
                         + "preferredTime 期望时间(必填);plantName 农作物;soilCondition 土壤条件;"
-                        + "plantCondition 作物当前状况;plantDetail 问题描述;message 留言(可选)。"
-                        + "缺少信息时先向农户追问补齐;信息齐全时直接调用,无需先口头确认(确认由系统确认卡完成)。电话和地址系统自动取用户资料。")
+                        + "plantCondition 作物当前状况;plantDetail 问题描述;area 种植面积(如:20亩,必填);message 留言(可选)。"
+                        + "缺少信息时先向用户追问补齐;信息齐全时直接调用,无需先口头确认(确认由系统确认卡完成)。电话和地址系统自动取用户资料。")
                 .parameters(Map.of(
                         "expertName", "string",
                         "preferredTime", "string",
@@ -58,6 +58,7 @@ public class ReserveExpertTool implements Tool {
                         "soilCondition", "string",
                         "plantCondition", "string",
                         "plantDetail", "string",
+                        "area", "string",
                         "message", "string"))
                 .build();
     }
@@ -74,11 +75,12 @@ public class ReserveExpertTool implements Tool {
         require(Args.str(args.get("soilCondition")), "请填写土壤条件");
         require(Args.str(args.get("plantCondition")), "请填写作物当前状况");
         require(Args.str(args.get("plantDetail")), "请填写具体问题/作物详情");
+        require(Args.str(args.get("area")), "请填写种植面积(如:20亩)");
         String phone = resolvePhone(ctx);
         String address = resolveAddress(ctx);
-        return StrUtil.format("即将预约专家 {}({}) 时间:{}\n农作物:{} 土壤:{} 状况:{}\n问题:{}\n联系电话:{} 地址:{}\n确认执行?",
+        return StrUtil.format("即将预约专家 {}({}) 时间:{}\n农作物:{} 面积:{} 土壤:{} 状况:{}\n问题:{}\n联系电话:{} 地址:{}\n确认执行?",
                 expertName, expert.getRealName(), args.get("preferredTime"), args.get("plantName"),
-                args.get("soilCondition"), args.get("plantCondition"), args.get("plantDetail"),
+                args.get("area"), args.get("soilCondition"), args.get("plantCondition"), args.get("plantDetail"),
                 masker.mask(phone), address);
     }
 
@@ -91,6 +93,7 @@ public class ReserveExpertTool implements Tool {
         req.setSoilCondition(Args.str(args.get("soilCondition")));
         req.setPlantCondition(Args.str(args.get("plantCondition")));
         req.setPlantDetail(Args.str(args.get("plantDetail")));
+        req.setArea(Args.str(args.get("area")));   // 种植面积(tb_reserve.area NOT NULL,漏传会确认后 SQL 失败)
         // 电话/地址自动取用户资料,不经过 LLM
         req.setPhone(resolvePhone(ctx));
         req.setAddress(resolveAddress(ctx));

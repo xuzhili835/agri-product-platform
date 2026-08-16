@@ -52,7 +52,9 @@ public class PlaceOrderTool implements Tool {
                 .description("下单购买商品(直接购买)。用户已表达购买意向并给出商品和数量时立即调用本工具;"
                         + "调用后系统会自动向用户展示确认卡,不需要你等待用户口头确认,也不要在文字里说'现在为您下单'之类的话。"
                         + "orderId 必须是本次会话 search_market 返回或在售列表中的真实商品编号;订单号不是商品编号。"
-                        + "count 为数量;address 为收货地址,用户说默认地址时原样传默认地址即可。")
+                        + "count 为数量。address 只能是'默认地址'或'地址簿#N'(N 为 list_addresses 返回的地址编号);"
+                        + "禁止编造地址文本——用户想用新地址时,先收集 省/市/区/详细地址/收件人/手机号 调 add_address 新增,"
+                        + "再用新地址的'地址簿#N'下单。")
                 .parameters(Map.of(
                         "orderId", "integer",
                         "count", "integer",
@@ -108,16 +110,40 @@ public class PlaceOrderTool implements Tool {
                 purchaseId, product.getPrice().multiply(new BigDecimal(item.getCount())));
     }
 
-    /** address 缺省或明确说"默认地址"时取买家默认收货地址;否则用用户给的地址文本。 */
+    /**
+     * address 只接受"默认地址"(取买家默认收货地址)或"地址簿#N"(N 为 list_addresses 返回的地址编号)。
+     * 自由文本地址一律拒绝——用户实测踩过"随口一句'长沙流通县'直接进订单":既不落地址簿、
+     * 也不是平台的三级区域(省/市/区)结构。新地址必须走 add_address 先落地址簿。
+     */
     private String resolveAddress(ToolContext ctx, Map<String, Object> args) {
         Object a = args.get("address");
         String addr = a == null ? null : a.toString().trim();
         boolean useDefault = addr == null || addr.isEmpty()
                 || "默认地址".equals(addr) || "默认".equals(addr) || "用默认地址".equals(addr);
-        if (!useDefault) return addr;
-        Address def = addressService.getDefaultAddress(ctx.getUserName());
-        if (def != null) return def.getFullAddress();
-        throw new RuntimeException("您还没有默认收货地址,请直接告诉我详细地址,或先在收货地址管理中添加");
+        if (useDefault) {
+            Address def = addressService.getDefaultAddress(ctx.getUserName());
+            if (def != null) return def.getFullAddress();
+            throw new RuntimeException("您还没有默认收货地址。请提供 省/市/区/详细地址/收件人/手机号,"
+                    + "我帮您新增到地址簿;或先在收货地址管理中添加");
+        }
+        // 地址簿#N / 地址N / 纯数字N → 地址簿第 N 条
+        Integer id = parseAddressId(addr);
+        if (id != null) {
+            Address hit = addressService.getAddressList(ctx.getUserName()).stream()
+                    .filter(x -> id.equals(x.getId())).findFirst().orElse(null);
+            if (hit != null) return hit.getFullAddress();
+            throw new RuntimeException("地址簿中没有编号为 " + id + " 的地址,请先调用 list_addresses 查看地址列表");
+        }
+        throw new RuntimeException("下单地址必须来自地址簿:请传'默认地址'或'地址簿#编号'(来自 list_addresses)。"
+                + "用户要用新地址时,先收集 省/市/区/详细地址/收件人/手机号 调 add_address 新增后再下单,"
+                + "不要把自由文本地址直接用于下单");
+    }
+
+    /** 解析"地址簿#N"/"地址#N"/"地址N"/纯数字"N",返回地址编号;不是编号格式返回 null。 */
+    private Integer parseAddressId(String addr) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("^(?:地址簿?|#)\\s*#?\\s*(\\d+)$").matcher(addr);
+        if (m.find()) return Integer.valueOf(m.group(1));
+        return addr.matches("\\d+") ? Integer.valueOf(addr) : null;
     }
 
     /** 模型可能把整数参数回成 "3.0"(hutool 解析为 Double/BigDecimal),统一走 Args 健壮转换。 */
