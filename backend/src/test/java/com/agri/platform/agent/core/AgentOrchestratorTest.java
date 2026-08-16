@@ -315,7 +315,7 @@ class AgentOrchestratorTest {
         assertEquals("抱歉,刚才的回复有误。请问您想购买什么商品?我先搜索再给您确认按钮。", out.getFinalText());
         assertEquals(2, prov.allCalls.size(), "拦截后应带纠偏指令重试一次");
         assertTrue(prov.allCalls.get(1).stream().anyMatch(m -> "system".equals(m.getRole())
-                        && m.getContent() != null && m.getContent().contains("已被系统拦截")),
+                        && m.getContent() != null && m.getContent().contains("被系统拦截")),
                 "重试请求里应包含纠偏 system 消息");
 
         // 重试仍输出假话术 → 返回兜底文案,绝不透出伪造内容

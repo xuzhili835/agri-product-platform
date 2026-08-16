@@ -64,18 +64,22 @@ public class AgentOrchestrator {
      *  出现在最终回复里既泄露内部机制也很难看(实测模型原样抄出过)。 */
     static final Pattern SYSTEM_LEAK = Pattern.compile("\\[(系统确认卡|系统:|用户对)");
 
+    /** 向用户索要账号已有资料:注册姓名/手机号/默认地址系统会自动获取,纯文字索要属于
+     *  违反第 11 条规则(实测模型反复问"请提供收件人和手机号"而不调工具)。 */
+    static final Pattern PII_ASK = Pattern.compile("请提供[^。！？\\n]{0,20}(手机号|收件人|真实姓名|您的姓名|收货地址簿)");
+
     private static final String FAKE_EXECUTION_REPLY =
             "抱歉,我刚才的回复方式有误,请忽略。您的请求还没有执行——请把需求再完整说一遍,"
                     + "我会调用对应的工具并弹出真正的确认按钮。";
 
     /** 拦截假话术后给模型的纠偏指令:给一次改正机会,多数模型会改调工具,用户无感。 */
     private static final String FAKE_CORRECTION_PROMPT =
-            "你上一条回复包含伪造的确认卡/执行结果格式,或把系统标注原文透给了用户,已被系统拦截,用户没有看到。"
-                    + "确认卡与执行结果只能由系统工具产生,你不能用文字模拟;方括号开头的系统标注(如[系统确认卡:...])"
-                    + "是给你的内部说明,严禁原样输出给用户。请重新回答本次问题:"
-                    + "需要执行写操作就必须调用对应工具(如 place_order),工具会生成真确认卡;"
-                    + "信息不足就用普通文字向用户追问;禁止输出'待确认操作'、'确认执行?'、"
-                    + "'下单成功/预约已提交/融资申请已提交'等系统专用格式文本。";
+            "你上一条回复被系统拦截,用户没有看到。原因可能是:伪造确认卡/执行结果格式、把系统标注原文透给用户、"
+            + "或向用户索要系统会自动获取的账号资料。请重新回答本次问题:"
+            + "需要执行写操作就必须调用对应工具(如 place_order/add_address),工具会生成真确认卡;"
+            + "需要收件人/手机号等账号资料时不要向用户索要,直接调用工具留空,系统自动用注册资料补齐,"
+            + "只有工具报错提示资料缺失时才让用户补充;信息不足就用普通文字向用户追问其他必要信息;"
+            + "禁止输出'待确认操作'、'确认执行?'、'下单成功'等系统专用格式文本,也不要把方括号系统标注透给用户。";
 
 
     private final ChatProvider chatProvider;
@@ -115,7 +119,8 @@ public class AgentOrchestrator {
             ChatResponse resp = chatProvider.chat(messages, tools, props.getChatModel());
             if (!resp.hasToolCalls()) {
                 String text = resp.getText() == null ? "" : resp.getText();
-                if (FAKE_EXECUTION.matcher(text).find() || SYSTEM_LEAK.matcher(text).find()) {
+                if (FAKE_EXECUTION.matcher(text).find() || SYSTEM_LEAK.matcher(text).find()
+                        || PII_ASK.matcher(text).find()) {
                     // 模型在未调工具的轮次用文字模仿系统格式(假确认卡/假执行结果)——拦截,
                     // 否则用户以为已下单,实际什么都没发生(实测复现过编造"海南新鲜芒果¥35"的假卡)。
                     // 拦截后带纠偏指令自动重试一轮:模型多数会改调工具,用户无感;
@@ -126,7 +131,7 @@ public class AgentOrchestrator {
                     ChatResponse retry = chatProvider.chat(messages, tools, props.getChatModel());
                     if (!retry.hasToolCalls()) {
                         String t2 = retry.getText() == null ? "" : retry.getText();
-                        if (FAKE_EXECUTION.matcher(t2).find() || SYSTEM_LEAK.matcher(t2).find()) {
+                        if (FAKE_EXECUTION.matcher(t2).find() || SYSTEM_LEAK.matcher(t2).find() || PII_ASK.matcher(t2).find()) {
                             log.warn("[agent] 纠偏重试仍输出假话术,返回兜底提示");
                             OrchestratorResult out = new OrchestratorResult();
                             out.setFinalText(FAKE_EXECUTION_REPLY);

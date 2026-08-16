@@ -44,7 +44,7 @@ public class ListAddressesTool implements Tool {
     public String previewOrExecute(ToolContext ctx, Map<String, Object> args) {
         List<Address> list = addressService.getAddressList(ctx.getUserName());
         if (list == null || list.isEmpty()) {
-            return "地址簿为空。请让用户提供 省/市/区/详细地址/收件人/手机号,先调 add_address 新增后再下单。";
+            return "地址簿为空。请让用户提供 省/市/区/详细地址,先调 add_address 新增后再下单(收件人/手机号留空,系统自动用注册资料)。";
         }
         return list.stream()
                 .map(a -> StrUtil.format("地址#{}{} {} {} {} {} 收件人:{} 电话:{}",
