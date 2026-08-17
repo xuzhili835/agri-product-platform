@@ -2,6 +2,7 @@ package com.agri.platform.agent.tool.impl;
 
 import cn.hutool.core.util.StrUtil;
 import com.agri.platform.agent.dto.ToolSpec;
+import com.agri.platform.agent.tool.LatestAddressCache;
 import com.agri.platform.agent.tool.SearchedProductCache;
 import com.agri.platform.agent.tool.Tool;
 import com.agri.platform.agent.tool.ToolContext;
@@ -40,6 +41,7 @@ public class PlaceOrderTool implements Tool {
     private final AddressService addressService;
     private final SearchedProductCache searchedCache;
     private final SearchMarketTool searchMarketTool;
+    private final LatestAddressCache latestAddressCache;
 
     public String name() { return "place_order"; }
 
@@ -52,7 +54,8 @@ public class PlaceOrderTool implements Tool {
                 .description("下单购买商品(直接购买)。用户已表达购买意向并给出商品和数量时立即调用本工具;"
                         + "调用后系统会自动向用户展示确认卡,不需要你等待用户口头确认,也不要在文字里说'现在为您下单'之类的话。"
                         + "orderId 必须是本次会话 search_market 返回或在售列表中的真实商品编号;订单号不是商品编号。"
-                        + "count 为数量。address 只能是'默认地址'或'地址簿#N'(N 为 list_addresses 返回的地址编号);"
+                        + "count 为数量。address 只能是'默认地址'、'新地址'(指本会话刚通过 add_address 新增的那条)或'地址簿#N'"
+                        + "(N 为 list_addresses 返回的地址编号);"
                         + "禁止编造地址文本——用户想用新地址时,先收集 省/市/区/详细地址/收件人/手机号 调 add_address 新增,"
                         + "再用新地址的'地址簿#N'下单。")
                 .parameters(Map.of(
@@ -118,6 +121,19 @@ public class PlaceOrderTool implements Tool {
     private String resolveAddress(ToolContext ctx, Map<String, Object> args) {
         Object a = args.get("address");
         String addr = a == null ? null : a.toString().trim();
+        // '新地址'快捷引用:取本会话刚通过 add_address 新增的地址——用户说"用新地址下单"时
+        // 模型无需翻地址簿找编号(实测会偷懒传'默认地址'导致新地址被无视)
+        if (addr != null && (addr.contains("新地址") || addr.contains("最新地址") || addr.contains("刚新增"))) {
+            Integer latestId = latestAddressCache.get(ctx.getSessionId());
+            if (latestId == null) {
+                throw new RuntimeException("本会话还没有新增过地址。请先让用户提供 省/市/区/详细地址 调 add_address,"
+                        + "或改用'默认地址'/'地址簿#编号'");
+            }
+            Address hit = addressService.getAddressList(ctx.getUserName()).stream()
+                    .filter(x -> latestId.equals(x.getId())).findFirst().orElse(null);
+            if (hit != null) return hit.getFullAddress();
+            throw new RuntimeException("刚新增的地址已不存在,请用 list_addresses 查看地址列表后重试");
+        }
         boolean useDefault = addr == null || addr.isEmpty()
                 || "默认地址".equals(addr) || "默认".equals(addr) || "用默认地址".equals(addr);
         if (useDefault) {
