@@ -1,0 +1,62 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-agri
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: 打包后端（顺带跑单元测试）
+        working-directory: backend
+        run: mvn -B package
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建前端
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - uses: webfactory/ssh-agent@v0.9.1
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: 信任服务器指纹
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H -T 10 ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: 上传产物到服务器暂存区
+        run: |
+          JAR=$(find backend/target -maxdepth 1 -name '*.jar' ! -name '*sources*' ! -name '*.original' | head -1)
+          echo "本次部署 jar: $JAR"
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} \
+            "mkdir -p /home/ubuntu/agri-repo/backend /home/ubuntu/agri-repo/dist /home/ubuntu/agri-repo/deploy"
+          scp -q "$JAR" ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/ubuntu/agri-repo/backend/app.jar
+          rsync -az --delete frontend/dist/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/ubuntu/agri-repo/dist/
+          rsync -az deploy/deploy.sh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:/home/ubuntu/agri-repo/deploy/
+
+      - name: 执行部署（备份→重启→健康检查→失败回滚）
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "bash /home/ubuntu/agri-repo/deploy/deploy.sh"
