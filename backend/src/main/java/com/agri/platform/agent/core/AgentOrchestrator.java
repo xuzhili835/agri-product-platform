@@ -82,18 +82,27 @@ public class AgentOrchestrator {
      *  避免误伤咨询类问答。 */
     static final Pattern FORM_SLOT_ASK = Pattern.compile(
             "(请|想)(您|你)?(告诉我|提供|填写|补充|说明|选择|输入)[^。！？\\n]{0,24}"
-                    + "(金额|原因|还款来源|时间|面积|省|市|区|详细地址|街道|门牌|套餐|农作物|状况|联合贷款人)"
+                    + "(金额|原因|还款来源|时间|面积|省|市|区|详细地址|街道|门牌|套餐|农作物|状况|联合贷款人"
+                    + "|问题标题|问题描述|问题详情)"
                     + "|(金额|原因|还款来源|具体时间|时间|周几|几点|上午还是下午|种植面积|面积"
-                    + "|什么农作物|农作物|生长情况|土壤条件|省|市|区|详细地址|套餐)"
+                    + "|什么农作物|农作物|生长情况|土壤条件|省|市|区|详细地址|套餐|问题标题|问题描述"
+                    + "|哪位专家|哪个专家|专家的姓名|专家姓名|哪位老师)"
                     + "[^。！？\\n]{0,8}[?？]");
+    /** 零工具轮的强索取:用户有表单写意图、模型还没调任何工具就开口要槽位
+     *  ("请问您想咨询哪位专家?")——问句形式比陈述式更难判,只认指名要专家/槽位的硬索取,
+     *  避免"融资怎么申请?"类流程咨询被误伤(那类回答即使带'请'也不指名索要槽位)。 */
+    static final Pattern FORM_STRONG_ASK = Pattern.compile(
+            "(哪位|哪个)[^。！？\\n]{0,3}(专家|老师)"
+                    + "|(告诉我|提供|告知|说明)[^。！？\\n]{0,16}(专家姓名|专家的姓名|哪位专家|作物名称|农作物名称)");
     /** 用户消息里的写请求意图(用于 FORM_SLOT_ASK 的联合判定)。 */
     static final Pattern WRITE_REQUEST = Pattern.compile(
-            "(预约|申请[^。！？\\n]{0,6}(贷|款|融资)|贷款|融资|加[^。！？\\n]{0,4}地址|新增地址|添加[^。！？\\n]{0,4}地址|下单|帮我买|取消订单)");
+            "(预约|申请[^。！？\\n]{0,6}(贷|款|融资)|贷款|融资|加[^。！？\\n]{0,4}地址|新增地址|添加[^。！？\\n]{0,4}地址|下单|帮我买|取消订单"
+                    + "|问[^。！？\\n]{0,8}(专家|老师)|提问|请教)");
 
-    /** 表单工具(预约/融资/地址)的用户写意图——比 WRITE_REQUEST 窄,不含下单/取消:
-     *  这三个工具的槽位一律由系统表单收集,模型检索完(如 list_experts)停下来用文字索要任何信息都不该发生。 */
+    /** 表单工具(预约/融资/地址/提问)的用户写意图——比 WRITE_REQUEST 窄,不含下单/取消:
+     *  这些工具的槽位一律由系统表单收集,模型检索完(如 list_experts)停下来用文字索要任何信息都不该发生。 */
     static final Pattern FORM_INTENT = Pattern.compile(
-            "(预约|申请|贷款|融资|加[^。！？\\n]{0,4}地址|新增地址|添加[^。！？\\n]{0,4}地址)");
+            "(预约|申请|贷款|融资|加[^。！？\\n]{0,4}地址|新增地址|添加[^。！？\\n]{0,4}地址|问[^。！？\\n]{0,8}(专家|老师)|请教专家)");
 
     /** 宣告催促:告诉模型计划说了/在追问表单槽位但工具没调——表单卡工具缺槽也直接调,系统表单会收集。
      *  实测模型可能连续两轮空宣告("请稍等,我将为您预约")才真正调工具,故允许催两次。 */
@@ -202,9 +211,14 @@ public class AgentOrchestrator {
                             && curUserMsg != null && TIME_GIVEN.matcher(curUserMsg).find();
                     boolean asksFormSlots = FORM_SLOT_ASK.matcher(text).find()
                             && curUserMsg != null && WRITE_REQUEST.matcher(curUserMsg).find();
-                    boolean formIntentStop = readToolCalls > 0 && curUserMsg != null
+                    // 零工具轮的强索取也催:模型一步没走就"请问您想咨询哪位专家?"(实测 H1)
+                    boolean strongFormAsk = curUserMsg != null
                             && FORM_INTENT.matcher(curUserMsg).find()
-                            && (text.contains("请") || text.contains("？") || text.contains("?"));
+                            && FORM_STRONG_ASK.matcher(text).find();
+                    boolean formIntentStop = curUserMsg != null
+                            && FORM_INTENT.matcher(curUserMsg).find()
+                            && (text.contains("请") || text.contains("？") || text.contains("?"))
+                            && (readToolCalls > 0 || strongFormAsk);
                     if (nudges < 2 && (NARRATED_WRITE_INTENT.matcher(text).find() || asksGivenTime
                             || asksFormSlots || formIntentStop)) {
                         nudges++;

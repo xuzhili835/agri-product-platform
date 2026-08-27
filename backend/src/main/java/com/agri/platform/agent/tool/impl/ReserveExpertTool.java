@@ -55,7 +55,9 @@ public class ReserveExpertTool implements Tool {
 
     public ToolSpec spec() {
         return ToolSpec.builder().name(name())
-                .description("预约专家咨询(表单卡):调用后系统会弹出可编辑表单,已提取的信息预填,缺失的槽位由用户在表单里补——"
+                .description("预约专家咨询(表单卡):用于'约时间/见面/上门一对一指导'场景;"
+                        + "用户只想问个文字问题用 ask_question,不要用本工具。"
+                        + "调用后系统会弹出可编辑表单,已提取的信息预填,缺失的槽位由用户在表单里补——"
                         + "因此信息不全也直接调用,严禁向用户追问任何字段(时间/面积/农作物/土壤等都不要问)。"
                         + "expertName 必须用 list_experts 返回的真实专家账号,用户只说姓名时你自己换算;"
                         + "preferredTime '周X上午/下午'粒度即可(选填);plantName 农作物;plantArea 种植面积(如:50亩);"

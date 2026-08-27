@@ -222,6 +222,9 @@ function buildFormState(fields) {
     if (f.key === 'plantDetail') {
       rs.push({ min: 10, message: `${f.label}不能少于10个字`, trigger: 'blur' })
     }
+    if (f.key === 'title' || f.key === 'question') {
+      rs.push({ min: 5, max: f.key === 'title' ? 100 : 2000, message: `${f.label}长度需在5字以上`, trigger: 'blur' })
+    }
     if (rs.length) rules[f.key] = rs
   }
   return { model, rules }
