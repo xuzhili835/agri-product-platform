@@ -69,6 +69,7 @@
                   :props="{ expandTrigger: 'hover', value: 'label', label: 'label' }"
                   placeholder="请选择省/市/区"
                   style="width: 100%"
+                  popper-class="agent-form-popper"
                   clearable
                 />
                 <el-select
@@ -76,6 +77,8 @@
                   v-model="msg.formModel[f.key]"
                   placeholder="请选择"
                   style="width: 100%"
+                  popper-class="agent-form-popper"
+                  filterable
                   clearable
                 >
                   <el-option v-for="o in f.options || []" :key="o.value" :label="o.label" :value="o.value" />
@@ -745,5 +748,14 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
     right: 16px;
     bottom: 16px;
   }
+}
+</style>
+
+<style>
+/* 表单下拉弹层(el-select/el-cascader 的 popper)teleport 到 body,scoped 样式够不着。
+   助手面板 z-index 9999 高于 Element Plus 弹层默认值(从 2000 起),
+   不抬高的话套餐/联系人下拉会被面板边缘覆盖。 */
+.agent-form-popper {
+  z-index: 10001 !important;
 }
 </style>
