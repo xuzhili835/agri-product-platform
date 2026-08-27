@@ -29,6 +29,9 @@ import java.util.Map;
 @Component
 @RequiredArgsConstructor
 public class AddAddressTool implements Tool {
+    /** 手机号规则与手动页 AddressManage.vue 同款:^1[3-9]\d{9}$。 */
+    private static final java.util.regex.Pattern PHONE = java.util.regex.Pattern.compile("^1[3-9]\\d{9}$");
+
     private final AddressService addressService;
     private final UserService userService;
     private final PiiMasker masker;
@@ -95,6 +98,11 @@ public class AddAddressTool implements Tool {
         if (city == null || city.isEmpty()) throw new RuntimeException("请选择城市");
         if (area == null || area.isEmpty()) throw new RuntimeException("请选择区/县");
         if (detail == null || detail.isEmpty()) throw new RuntimeException("请填写详细地址(街道/门牌号)");
+        // 手机号:手动页正则同款;空值允许(将自动回填注册资料),填了就必须合法
+        String phone = Args.str(args.get("phone"));
+        if (phone != null && !phone.isEmpty() && !PHONE.matcher(phone).matches()) {
+            throw new RuntimeException("请填写正确的手机号(11位,1开头)");
+        }
     }
 
     @Override

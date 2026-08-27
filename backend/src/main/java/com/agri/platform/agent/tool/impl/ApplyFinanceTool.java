@@ -70,7 +70,7 @@ public class ApplyFinanceTool implements Tool {
         }
         // 使用 StrUtil.format(regex-safe) 替代 replaceAll,避免 $ / \ 触发崩溃
         String head = productId == null ? "未选择(请在表单中选择)"
-                : StrUtil.format("#{} {}", productId, product.getProductName());
+                : StrUtil.format("#{} {}", productId, productTitle(product));
         return StrUtil.format("即将提交融资申请:套餐{}\n申请金额:{}元(按套餐额度固定) 还款期限:{}期(按套餐)\n申请原因:{}\n还款来源:{}\n联合贷款人:{},{}(提交后对方将收到邀请)\n确认执行?",
                 head,
                 product == null || product.getMoney() == null ? "-" : product.getMoney(),
@@ -203,7 +203,14 @@ public class ApplyFinanceTool implements Tool {
         // 内部按 userName 取 realName/phone;role/money/purpose/repaymentSource 校验在此抛
         financeService.applyFinance(ctx.getUserName(), req);
         return StrUtil.format("融资申请已提交(套餐:{} 申请金额:{}元),等待银行审批;联合贷款人会收到邀请通知",
-                product.getProductName(), product.getMoney());
+                productTitle(product), product.getMoney());
+    }
+
+    /** 产品名可能为 NULL(如#4 邮政轻松贷):有名称用名称,缺失退回银行名,避免"套餐:null"。 */
+    private String productTitle(FinanceProduct p) {
+        String name = StrUtil.nullToEmpty(p.getProductName());
+        String bank = StrUtil.nullToEmpty(p.getBankName());
+        return name.isEmpty() ? (bank.isEmpty() ? "#" + p.getProductId() : bank) : name;
     }
 
     private String toStrOrNull(Object o) {
