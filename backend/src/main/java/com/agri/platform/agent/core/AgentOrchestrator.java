@@ -55,14 +55,58 @@ public class AgentOrchestrator {
     static final Pattern FAKE_EXECUTION = Pattern.compile(
             "待确认操作|即将下单.*确认执行\\?|即将预约.*确认执行\\?|即将提交融资.*确认执行\\?"
                     + "|下单成功[,，]订单号|预约已提交|融资申请已提交"
-                    // 现在时承诺:"为您下单"却没调工具——用户以为正在执行。
-                    // 注意:不拦"我将/接下来…提交"类将来时预告——实测误伤率高(模型查完套餐
-                    // 习惯说"我将为您提交"再调工具),拦了反而触发兜底循环;完成式伪造仍被拦,底线不破
-                    + "|(现在|正在|马上)?为您(下单|购买|下单购买)", Pattern.DOTALL);
+                    // 完成式/现在时承诺:"已/正在/马上为您下单"却没调工具——用户以为已执行或正在执行。
+                    // 注意:不拦"我将/接下来…提交"类将来时预告,也不拦"需要我为您下单吗?"征询句
+                    // (实测误伤率高:模型习惯先征询再调工具,拦了反而触发兜底循环);完成式伪造仍被拦,底线不破
+                    + "|(已|已经|现在|正在|马上)为您(下单|购买|下单购买)(?![吗么？?])", Pattern.DOTALL);
 
     /** 系统内部标注泄露:回灌历史用的 [系统确认卡:…]/[系统:…]/[用户对…] 标注是给模型的,
      *  出现在最终回复里既泄露内部机制也很难看(实测模型原样抄出过)。 */
     static final Pattern SYSTEM_LEAK = Pattern.compile("\\[(系统确认卡|系统:|用户对)");
+
+    /** 纯文字轮"宣告将执行"却没发工具调用:模型槽位集齐、复述完计划("我将直接为您提交预约申请"
+     *  /工具报错后"我将再次尝试提交")后把宣告当终稿。不算假执行(未声称已完成),但用户等不来确认卡——
+     *  注入催促再跑一轮,多数情况模型会真正调工具。排除问句("需要我为您下单吗?"是征询,不是宣告)。 */
+    static final Pattern NARRATED_WRITE_INTENT =
+            Pattern.compile("我[^。！？\\n]{0,15}(为|帮)(您|你)[^。！？\\n]{0,8}(提交|预约|下单|新增|办理|购买)(?![^。！？\\n]{0,4}[吗呢？?])"
+                    + "|我[^。！？\\n]{0,8}再次[^。！？\\n]{0,4}尝试[^。！？\\n]{0,8}(提交|申请|预约|下单)");
+
+    /** 时间已给还在追问("上午还是下午/几点")——用户消息里已有"周X/上午/下午"等时间表达,
+     *  模型仍把时间当缺失槽位追问(实测:"下周三下午"被问"上午还是下午")。 */
+    static final Pattern TIME_ASK = Pattern.compile("(上午还是下午|下午还是上午|几点|具体时间|期望时间|哪一天|周几)");
+    static final Pattern TIME_GIVEN = Pattern.compile("(周[一二三四五六日天]|星期[一二三四五六日天]|今天|明天|后天|上午|下午|傍晚|晚上)");
+
+    /** 表单工具槽位追问:reserve_expert/add_address/apply_finance 调用后系统弹表单收集缺失字段,
+     *  模型却还在文字里要槽位——实测三种句式:陈述式索取("请提供省、市、区和详细地址")、
+     *  问句式("金额是多少？""周几上午或下午?")、空口宣告后等用户补充。与用户消息的写意图联合判定,
+     *  避免误伤咨询类问答。 */
+    static final Pattern FORM_SLOT_ASK = Pattern.compile(
+            "(请|想)(您|你)?(告诉我|提供|填写|补充|说明|选择|输入)[^。！？\\n]{0,24}"
+                    + "(金额|原因|还款来源|时间|面积|省|市|区|详细地址|街道|门牌|套餐|农作物|状况|联合贷款人)"
+                    + "|(金额|原因|还款来源|具体时间|时间|周几|几点|上午还是下午|种植面积|面积"
+                    + "|什么农作物|农作物|生长情况|土壤条件|省|市|区|详细地址|套餐)"
+                    + "[^。！？\\n]{0,8}[?？]");
+    /** 用户消息里的写请求意图(用于 FORM_SLOT_ASK 的联合判定)。 */
+    static final Pattern WRITE_REQUEST = Pattern.compile(
+            "(预约|申请[^。！？\\n]{0,6}(贷|款|融资)|贷款|融资|加[^。！？\\n]{0,4}地址|新增地址|添加[^。！？\\n]{0,4}地址|下单|帮我买|取消订单)");
+
+    /** 表单工具(预约/融资/地址)的用户写意图——比 WRITE_REQUEST 窄,不含下单/取消:
+     *  这三个工具的槽位一律由系统表单收集,模型检索完(如 list_experts)停下来用文字索要任何信息都不该发生。 */
+    static final Pattern FORM_INTENT = Pattern.compile(
+            "(预约|申请|贷款|融资|加[^。！？\\n]{0,4}地址|新增地址|添加[^。！？\\n]{0,4}地址)");
+
+    /** 宣告催促:告诉模型计划说了/在追问表单槽位但工具没调——表单卡工具缺槽也直接调,系统表单会收集。
+     *  实测模型可能连续两轮空宣告("请稍等,我将为您预约")才真正调工具,故允许催两次。 */
+    private static final String NARRATED_INTENT_NUDGE =
+            "你上一条回复在提问或空口宣告,而不是行动。reserve_expert/add_address/apply_finance 是表单卡工具:"
+                    + "调用后系统会自动弹出可编辑表单,已提取的信息预填、缺失的槽位由用户自己在表单里补——"
+                    + "因此这几个工具严禁向用户追问任何字段(时间/面积/农作物/状况/金额/原因/还款来源/省市区/详细地址都不要问),"
+                    + "把已知信息全部带上直接调用工具,哪怕只提取到一两个字段。"
+                    + "预约专家时先调 list_experts 把用户说的姓名换算成真实账号,再调 reserve_expert;"
+                    + "融资时无法确定套餐就直接调用 apply_finance 并省略 productId,用户会在表单下拉里自己选;"
+                    + "其他写工具(place_order/cancel_order)必填信息能从会话中获得时立即调用,确实缺失才追问且只问缺的;"
+                    + "用户消息里的时间(如'下周三下午')原样使用,禁止问'上午还是下午/几点'。"
+                    + "你的下一条回复不允许再出现纯文字宣告或追问:必须立即发出工具调用(function call)。";;
 
     /** 向用户索要/询问账号已有资料:注册姓名/手机号系统会自动获取,纯文字索要或反复问
      *  "需要指定吗"都违反第 11 条规则(实测两种变体都出现过:直接索要、委婉询问),一律拦截。 */
@@ -111,6 +155,8 @@ public class AgentOrchestrator {
         ToolContext ctx = new ToolContext(userName, role, sessionId);
         int maxIter = props.getMaxIterations();
         long deadline = System.currentTimeMillis() + DEADLINE_MS;
+        int nudges = 0;          // 宣告/槽位追问催促次数(实测模型可能连续空宣告,允许催两次)
+        int readToolCalls = 0;   // 本次 run 已执行的读工具轮数(表单意图"检索完停下来追问"判定用)
 
         for (int iter = 0; iter < maxIter; iter++) {
             if (System.currentTimeMillis() > deadline) {
@@ -146,6 +192,27 @@ public class AgentOrchestrator {
                     }
                     resp = retry;   // 重试后愿意调工具了,接回主流程处理 tool_calls
                 } else {
+                    // 宣告"我将执行"却没调工具 / 时间已给还在追问 / 表单工具槽位追问:最多催两次,
+                    // 催完真调工具就出卡,仍不调就把文字放行。
+                    // formIntentStop:表单工具写意图的用户,模型检索完读工具(list_experts/query_financing_products)
+                    // 却停下来用文字索要信息(措辞变体无穷:请告知/请提供/请问…,无法逐词枚举)——
+                    // 按"已做读工具+文本含请或问号"宽判定,这三类工具缺槽也该直接调,由表单收集
+                    String curUserMsg = currentUserName(messages);
+                    boolean asksGivenTime = TIME_ASK.matcher(text).find()
+                            && curUserMsg != null && TIME_GIVEN.matcher(curUserMsg).find();
+                    boolean asksFormSlots = FORM_SLOT_ASK.matcher(text).find()
+                            && curUserMsg != null && WRITE_REQUEST.matcher(curUserMsg).find();
+                    boolean formIntentStop = readToolCalls > 0 && curUserMsg != null
+                            && FORM_INTENT.matcher(curUserMsg).find()
+                            && (text.contains("请") || text.contains("？") || text.contains("?"));
+                    if (nudges < 2 && (NARRATED_WRITE_INTENT.matcher(text).find() || asksGivenTime
+                            || asksFormSlots || formIntentStop)) {
+                        nudges++;
+                        log.warn("[agent] 纯文字轮宣告未执行/追问槽位,注入催促续跑: {}", text.replaceAll("\n", " "));
+                        messages.add(new ChatMessage("assistant", text, null, null));
+                        messages.add(new ChatMessage("system", NARRATED_INTENT_NUDGE, null, null));
+                        continue;
+                    }
                     OrchestratorResult out = new OrchestratorResult();
                     out.setFinalText(text);
                     return out;
@@ -182,9 +249,16 @@ public class AgentOrchestrator {
                     out.setFinalText(draft);
                     out.setPendingId(p.getId());
                     out.setDraft(draft);
+                    // 表单卡:字段列表随卡下发,前端预填渲染,缺失槽位用户在表单里补(模型无需追问)
+                    try {
+                        out.setForm(tool.formFields(ctx, args));
+                    } catch (Exception e) {
+                        log.warn("[agent] 工具 {} formFields 异常,降级为文字卡:{}", call.getName(), e.getMessage());
+                    }
                     return out;
                 }
                 // 读工具:执行(异常即观察)
+                readToolCalls++;
                 String result;
                 try {
                     result = tool.previewOrExecute(ctx, args);
@@ -201,6 +275,15 @@ public class AgentOrchestrator {
         return out;
     }
 
+    /** 取消息列表中最后一条 user 消息内容(当前轮用户输入),供"时间已给还追问"判定。 */
+    private String currentUserName(List<ChatMessage> messages) {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            ChatMessage m = messages.get(i);
+            if ("user".equals(m.getRole())) return m.getContent();
+        }
+        return null;
+    }
+
     /**
      * 用户确认 pending 后,执行写工具,返回结构化结果(供 controller 再灌进上下文续聊)。
      * <p><strong>属主校验</strong>:pending 的 ctx.userName 必须等于当前登录用户,否则 rejected——
@@ -210,28 +293,85 @@ public class AgentOrchestrator {
      * 两个并发确认只有一个拿到非 null,另一个必得 timeout——关闭 get→remove→execute 三步的 TOCTOU 双写。</p>
      */
     public ConfirmOutcome confirmAndExecute(String pendingId, boolean accept, String userName) {
+        return confirmAndExecute(pendingId, accept, userName, null);
+    }
+
+    /**
+     * 带表单值的确认重载:表单卡提交时用户编辑/补全的字段以 overrideArgs 传入——
+     * 非空值覆盖挂起时存的 args,空串/null 视为清掉该键(前端空值本来就不传,这里双保险)。
+     * <p>合并后先 validate+preview 预检,失败返回 ERROR 且<strong>不消费 pending</strong>——
+     * 前端表单保持可编辑,用户改完可再次提交;预检通过才原子 remove 并 execute。</p>
+     */
+    public ConfirmOutcome confirmAndExecute(String pendingId, boolean accept, String userName,
+                                            Map<String, Object> overrideArgs) {
         PendingActionStore.Pending existing = pendingStore.get(pendingId);
         if (existing != null && !existing.getCtx().getUserName().equals(userName)) {
             log.warn("[agent] 用户 {} 试图确认不属于自己的 pending(属主:{})", userName, existing.getCtx().getUserName());
             return ConfirmOutcome.of(ConfirmOutcome.REJECTED, "无权确认该操作");
         }
-        PendingActionStore.Pending p = pendingStore.remove(pendingId);   // atomic consume — closes the double-confirm race
+        if (!accept) {
+            PendingActionStore.Pending p = pendingStore.remove(pendingId);   // 取消也消费掉,防旧卡复活
+            if (p == null) return ConfirmOutcome.of(ConfirmOutcome.TIMEOUT, "该操作已超时或不存在,请重新发起");
+            return ConfirmOutcome.of(ConfirmOutcome.CANCELLED, "已取消该操作");
+        }
+        PendingActionStore.Pending p = pendingStore.get(pendingId);
         if (p == null) return ConfirmOutcome.of(ConfirmOutcome.TIMEOUT, "该操作已超时或不存在,请重新发起");
-        if (!accept) return ConfirmOutcome.of(ConfirmOutcome.CANCELLED, "已取消该操作");
+        Map<String, Object> merged = mergeArgs(p.getArgs(), overrideArgs);
         try {
-            return ConfirmOutcome.of(ConfirmOutcome.EXECUTED, p.getTool().execute(p.getCtx(), p.getArgs()));
+            // 预检(不消费 pending):必填校验 + 业务校验/在售复验,失败时表单保持可编辑可重试
+            p.getTool().validate(merged);
+            p.getTool().previewOrExecute(p.getCtx(), merged);
+        } catch (Exception e) {
+            log.warn("[agent] 确认预检失败(pending 保留可重试):{}", e.getMessage());
+            return ConfirmOutcome.of(ConfirmOutcome.ERROR, "[校验未通过] " + e.getMessage());
+        }
+        PendingActionStore.Pending consumed = pendingStore.remove(pendingId);   // atomic consume — closes the double-confirm race
+        if (consumed == null) return ConfirmOutcome.of(ConfirmOutcome.TIMEOUT, "该操作已超时或不存在,请重新发起");
+        try {
+            return ConfirmOutcome.of(ConfirmOutcome.EXECUTED, consumed.getTool().execute(consumed.getCtx(), merged));
         } catch (Exception e) {
             log.warn("[agent] 确认执行异常:{}", e.getMessage());
             return ConfirmOutcome.of(ConfirmOutcome.ERROR, "[执行失败] " + e.getMessage());
         }
     }
 
+    /** 表单值合并:非空覆盖存量,空值删除该键(让工具的自动兜底/注册资料回填生效)。 */
+    private Map<String, Object> mergeArgs(Map<String, Object> base, Map<String, Object> override) {
+        Map<String, Object> merged = new java.util.HashMap<>();
+        if (base != null) merged.putAll(base);
+        if (override != null) {
+            for (Map.Entry<String, Object> e : override.entrySet()) {
+                Object v = e.getValue();
+                if (v == null || (v instanceof String s && s.trim().isEmpty())) {
+                    merged.remove(e.getKey());
+                } else {
+                    merged.put(e.getKey(), v instanceof String s ? s.trim() : v);
+                }
+            }
+        }
+        return merged;
+    }
+
+    /** 模型塞进参数的占位文字:该追问没追问时,模型会把追问措辞本身当值传("周几上午""多少亩"
+     *  "当前状况""暂无"),以及空串/JSON null 占位——解析参数时统一清掉,视同未提供。 */
+    static final Pattern PLACEHOLDER_VALUE = Pattern.compile(
+            "周几|星期几|周[XXx]|星期[XXx]|上午还是下午|几点|多少|待填|待补充|待定|未填写|未提供|不知道|不确定|暂无|没有");
+
     private Map<String, Object> parseArgs(String arguments) {
         if (arguments == null || arguments.isBlank()) return Map.of();
         try {
             JSONObject o = JSONUtil.parseObj(arguments);
             Map<String, Object> m = new java.util.HashMap<>();
-            o.forEach(m::put);
+            o.forEach((k, v) -> {
+                // hutool 把 JSON null 解析成 JSONNull 对象(非 null 非 String),toString 还原成 "null" 字符串——一并清掉
+                if (v == null || v instanceof cn.hutool.json.JSONNull) return;
+                if (v instanceof String s) {
+                    String t = s.trim();
+                    if (t.isEmpty() || "null".equalsIgnoreCase(t) || "none".equalsIgnoreCase(t)
+                            || PLACEHOLDER_VALUE.matcher(t).find()) return;
+                }
+                m.put(k, v);
+            });
             return m;
         } catch (Exception e) {
             return Map.of();

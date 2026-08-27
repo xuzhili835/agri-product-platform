@@ -17,7 +17,9 @@ export function getAgentStatus() {
 /**
  * 发送对话消息
  * @param {Object} data - { message: string, sessionId?: string }
- * @returns {Promise} { sessionId, reply, pendingId, needsConfirm }
+ * @returns {Promise} { sessionId, reply, pendingId, needsConfirm, form?: Array }
+ *   form:表单卡字段列表(key/label/type/value/required/options/placeholder/hint),
+ *   纯文字确认卡(下单/取消)时为 null
  */
 export function agentChat(data) {
   return request({
@@ -30,8 +32,9 @@ export function agentChat(data) {
 
 /**
  * 确认/取消写操作
- * @param {Object} data - { pendingId: string, accept: boolean, sessionId: string }
- * @returns {Promise} { reply: string }
+ * @param {Object} data - { pendingId: string, accept: boolean, sessionId: string, args?: Object }
+ *   args:表单卡提交的编辑值(非空项才传),后端合并进挂起参数;纯文字卡不传
+ * @returns {Promise} { reply, status, success }
  */
 export function agentConfirm(data) {
   return request({

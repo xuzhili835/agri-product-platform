@@ -92,7 +92,8 @@ public class SiliconFlowChatProvider implements ChatProvider {
     String buildRequestBody(List<ChatMessage> messages, List<ToolSpec> tools, String model) {
         JSONObject body = new JSONObject();
         body.set("model", model);
-        body.set("temperature", 0.3);
+        // 0.2:低温收紧指令遵循(实测 0.3 下模型会无视"直接调工具/不追问"类强指令去征询用户)
+        body.set("temperature", 0.2);
         JSONArray msgs = new JSONArray();
         for (ChatMessage m : messages) {
             JSONObject o = new JSONObject();

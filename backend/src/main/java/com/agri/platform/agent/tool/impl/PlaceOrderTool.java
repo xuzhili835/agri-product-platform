@@ -8,6 +8,7 @@ import com.agri.platform.agent.tool.Tool;
 import com.agri.platform.agent.tool.ToolContext;
 import com.agri.platform.agent.util.Args;
 import com.agri.platform.dto.OrderRequest;
+import com.agri.platform.dto.OrderResponse;
 import com.agri.platform.entity.Address;
 import com.agri.platform.entity.Product;
 import com.agri.platform.mapper.ProductMapper;
@@ -52,12 +53,19 @@ public class PlaceOrderTool implements Tool {
     public ToolSpec spec() {
         return ToolSpec.builder().name(name())
                 .description("下单购买商品(直接购买)。用户已表达购买意向并给出商品和数量时立即调用本工具;"
-                        + "调用后系统会自动向用户展示确认卡,不需要你等待用户口头确认,也不要在文字里说'现在为您下单'之类的话。"
+                        + "调用后系统会自动向用户展示确认卡,不需要你等待用户口头确认,也不要在文字里说'现在为您下单'之类的话,"
+                        + "更不要征询式反问('需要我为您下单吗''要买2斤吗''您用哪个地址')——用户说买就是意向,确认卡本身就是征询;"
+                        + "用户没提地址时 address 一律传'默认地址'(确认卡上用户可核对修改),不要反问选哪个地址;"
+                        + "'一份/一个/一斤/两份'等量词即数量(换算成数字)直接出卡,禁止追问数量;"
+                        + "仅当计价单位与用户说法无法换算(如按斤计价却说'一箱')时才允许追问换算数量;"
+                        + "下单过程中禁止询问与商品/收货无关的问题。"
                         + "orderId 必须是本次会话 search_market 返回或在售列表中的真实商品编号;订单号不是商品编号。"
                         + "count 为数量。address 只能是'默认地址'、'新地址'(指本会话刚通过 add_address 新增的那条)或'地址簿#N'"
-                        + "(N 为 list_addresses 返回的地址编号);"
-                        + "禁止编造地址文本——用户想用新地址时,先收集 省/市/区/详细地址/收件人/手机号 调 add_address 新增,"
-                        + "再用新地址的'地址簿#N'下单。")
+                        + "(N 为 list_addresses 返回的地址编号)。"
+                        + "用户提到'新地址/最新地址/刚加的地址'且本会话已新增过地址时,address 直接传'新地址',系统会自动引用,"
+                        + "不要再调 add_address、更不要向用户索要地址信息;只有用户要用一个从未提供过的地址时,"
+                        + "才让用户提供 省/市/区/详细地址 并调 add_address(收件人/手机号系统自动取注册资料,不要索要),"
+                        + "然后 address 传'新地址'下单。")
                 .parameters(Map.of(
                         "orderId", "integer",
                         "count", "integer",
@@ -90,8 +98,10 @@ public class PlaceOrderTool implements Tool {
         if (product == null) throw new RuntimeException("商品#" + orderId + " 不存在或已下架,请用 search_market 重新选择");
         String address = resolveAddress(ctx, args);
         BigDecimal total = product.getPrice().multiply(new BigDecimal(count));
-        return StrUtil.format("即将下单:{} ¥{} x {} = ¥{}\n收货地址:{}\n确认执行?",
-                product.getTitle(), product.getPrice(), count, total, address);
+        // 换购自查(服务端兜底,不依赖模型记得先查单):同商品已有待付款订单时在确认卡上附提醒
+        String reorderHint = pendingSameProductHint(ctx.getUserName(), orderId);
+        return StrUtil.format("即将下单:{} ¥{} x {} = ¥{}\n收货地址:{}\n{}确认执行?",
+                product.getTitle(), product.getPrice(), count, total, address, reorderHint);
     }
 
     public String execute(ToolContext ctx, Map<String, Object> args) {
@@ -111,6 +121,27 @@ public class PlaceOrderTool implements Tool {
         Integer purchaseId = orderService.submitOrder(ctx.getUserName(), req);
         return StrUtil.format("下单成功,订单号:{},合计:¥{}。请在订单列表完成支付。",
                 purchaseId, product.getPrice().multiply(new BigDecimal(item.getCount())));
+    }
+
+    /** 换购提醒:查本人待付款订单中是否已含该商品,有则返回提醒文案(尽力而为,查询失败不阻塞下单)。 */
+    private String pendingSameProductHint(String userName, Integer orderId) {
+        try {
+            var page = orderService.getOrderListWithDetailsPaged(userName, 1, 50, 1);
+            if (page == null || page.getRecords() == null) return "";
+            for (OrderResponse o : page.getRecords()) {
+                if (o.getItems() == null) continue;
+                for (OrderResponse.OrderItemResponse it : o.getItems()) {
+                    if (orderId.equals(it.getProductId())) {
+                        return StrUtil.format("[提醒] 您已有该商品的待付款订单#{}({} x {},合计¥{})。"
+                                        + "如需换购,可对我说\"取消订单#{}\"先取消旧单;直接确认将再下一张新单。\n",
+                                o.getPurchaseId(), it.getProductName(), it.getCount(), o.getTotalPrice(), o.getPurchaseId());
+                    }
+                }
+            }
+        } catch (Exception ignore) {
+            // 提醒是增值信息,查不到不影响下单主流程
+        }
+        return "";
     }
 
     /**

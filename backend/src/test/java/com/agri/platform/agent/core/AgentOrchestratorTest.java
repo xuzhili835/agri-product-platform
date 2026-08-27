@@ -3,6 +3,7 @@ package com.agri.platform.agent.core;
 import com.agri.platform.agent.dto.ChatMessage;
 import com.agri.platform.agent.dto.ChatResponse;
 import com.agri.platform.agent.dto.ConfirmOutcome;
+import com.agri.platform.agent.dto.FormField;
 import com.agri.platform.agent.dto.OrchestratorResult;
 import com.agri.platform.agent.dto.ToolCall;
 import com.agri.platform.agent.dto.ToolSpec;
@@ -339,5 +340,171 @@ class AgentOrchestratorTest {
         OrchestratorResult out3 = orch3.run(List.of(new ChatMessage("user", "怎么下单?", null, null)), "buyer", "u1", "s1");
         assertEquals("下单需要先搜索商品,选择后我会给您弹出确认按钮,点击确认才会真正提交订单。", out3.getFinalText());
         assertEquals(1, prov3.allCalls.size(), "正常文本不应触发重试");
+    }
+
+    @Test
+    void narratedIntentNudgedIntoRealToolCall() {
+        // 回归(实测):模型槽位集齐后说"我将直接为您提交预约申请"却不发工具调用,把宣告当终稿。
+        // 编排器应注入催促再跑一轮;催完真调工具 → 出确认卡;催了仍只说不动 → 原文放行(单轮只催一次)
+        FakeWriteTool reserve = new FakeWriteTool("reserve_expert", "即将预约:王教授", "预约已提交");
+        ScriptedProvider prov = new ScriptedProvider();
+        ChatResponse narrate = new ChatResponse();
+        narrate.setText("农作物:芒果 种植面积:50亩。我将直接为您提交预约申请。");
+        prov.add(narrate);
+        ChatResponse realCall = new ChatResponse();
+        ToolCall tc = new ToolCall();
+        tc.setId("c1");
+        tc.setName("reserve_expert");
+        tc.setArguments("{}");
+        realCall.setToolCalls(List.of(tc));
+        prov.add(realCall);
+
+        AgentOrchestrator orch = new AgentOrchestrator(prov, new ToolRegistry(List.of(reserve)),
+                new PendingActionStore(props()), props());
+        OrchestratorResult out = orch.run(List.of(new ChatMessage("user", "预约王教授", null, null)), "farmer", "u1", "s1");
+        assertTrue(out.needsConfirm(), "催促后模型调了工具,应出确认卡");
+        assertEquals("即将预约:王教授", out.getFinalText());
+        assertEquals(2, prov.allCalls.size(), "催促只多跑一轮");
+
+        // 催了仍宣告(不调工具):最多再催一次,第二次催后仍宣告则原文放行(不进假执行兜底)
+        ScriptedProvider prov2 = new ScriptedProvider();
+        ChatResponse narrate2 = new ChatResponse();
+        narrate2.setText("我将直接为您提交预约申请。");
+        prov2.add(narrate2);
+        ChatResponse narrate3 = new ChatResponse();
+        narrate3.setText("请稍候,我将直接为您提交预约申请。");
+        prov2.add(narrate3);
+        ChatResponse narrate4 = new ChatResponse();
+        narrate4.setText("我将直接为您提交预约申请,请稍等。");
+        prov2.add(narrate4);
+        AgentOrchestrator orch2 = new AgentOrchestrator(prov2, new ToolRegistry(List.of(reserve)),
+                new PendingActionStore(props()), props());
+        OrchestratorResult out2 = orch2.run(List.of(new ChatMessage("user", "预约王教授", null, null)), "farmer", "u1", "s1");
+        assertFalse(out2.needsConfirm());
+        assertEquals(3, prov2.allCalls.size(), "催两次后放行,不再无限催");
+    }
+
+    /** 表单卡假写工具:preview 宽松出卡(缺必填不抛)、validate 校验必填 b、execute 记录收到的参数。 */
+    static class FakeFormTool implements Tool {
+        final java.util.List<Map<String, Object>> executedArgs = new java.util.ArrayList<>();
+        @Override public String name() { return "reserve_expert"; }
+        @Override public String role() { return "common"; }
+        @Override public boolean isWrite() { return true; }
+        @Override public ToolSpec spec() {
+            return ToolSpec.builder().name("reserve_expert").description("fake form").parameters(Map.of()).build();
+        }
+        @Override public String previewOrExecute(ToolContext c, Map<String, Object> a) {
+            return "即将预约专家:" + a.getOrDefault("a", "未选择") + " 时间:" + a.getOrDefault("b", "未填写");
+        }
+        @Override public void validate(Map<String, Object> args) {
+            Object b = args.get("b");
+            if (b == null || b.toString().isBlank()) throw new RuntimeException("请填写期望时间");
+        }
+        @Override public List<FormField> formFields(ToolContext c, Map<String, Object> a) {
+            return List.of(FormField.builder().key("b").label("期望时间").type("text")
+                    .value(a.get("b") == null ? null : a.get("b").toString()).required(true).build());
+        }
+        @Override public String execute(ToolContext c, Map<String, Object> a) {
+            executedArgs.add(a);
+            return "预约已提交";
+        }
+    }
+
+    @Test
+    void formCardExposedWithPrefilledArgs() {
+        // 表单卡工具:部分参数(缺必填 b)也能出卡,且 form 字段列表随卡透出;
+        // 非表单写工具(未实现 formFields)form 保持 null,走纯文字卡
+        PendingActionStore store = new PendingActionStore(props());
+        FakeFormTool formTool = new FakeFormTool();
+        FakeWriteTool plainTool = new FakeWriteTool("place_order", "draft", "done");
+        ScriptedProvider prov = new ScriptedProvider();
+        ChatResponse r1 = new ChatResponse();
+        ToolCall tc = new ToolCall();
+        tc.setId("c1");
+        tc.setName("reserve_expert");
+        tc.setArguments("{\"a\":\"王教授\"}");   // 只给了 a,缺必填 b——preview 不抛、出表单卡
+        r1.setToolCalls(List.of(tc));
+        prov.add(r1);
+
+        AgentOrchestrator orch = new AgentOrchestrator(prov, new ToolRegistry(List.of(formTool, plainTool)), store, props());
+        OrchestratorResult out = orch.run(List.of(new ChatMessage("user", "预约王教授", null, null)), "farmer", "u1", "s1");
+        assertTrue(out.needsConfirm(), "部分参数也应出卡(槽位由表单收集)");
+        assertNotNull(out.getForm(), "表单卡工具必须透出 form 字段列表");
+        assertEquals(1, out.getForm().size());
+        assertEquals("b", out.getForm().get(0).getKey());
+        assertTrue(out.getForm().get(0).isRequired());
+        assertNull(out.getForm().get(0).getValue(), "未提供的槽位预填值应为空");
+
+        // 非表单写工具:form 为 null(纯文字卡,协议不变)
+        ChatResponse r2 = new ChatResponse();
+        ToolCall tc2 = new ToolCall();
+        tc2.setId("c2");
+        tc2.setName("place_order");
+        tc2.setArguments("{}");
+        r2.setToolCalls(List.of(tc2));
+        prov.add(r2);
+        OrchestratorResult out2 = orch.run(List.of(new ChatMessage("user", "下单", null, null)), "buyer", "u1", "s1");
+        assertTrue(out2.needsConfirm());
+        assertNull(out2.getForm(), "未实现 formFields 的写工具走纯文字卡");
+    }
+
+    @Test
+    void confirmWithOverrideArgsMergesAndExecutes() {
+        // 表单提交值合并:非空覆盖存量(且去首尾空白)、空串删键、未涉及键保留;
+        // execute 收到的是合并后的参数
+        PendingActionStore store = new PendingActionStore(props());
+        FakeFormTool tool = new FakeFormTool();
+        ScriptedProvider prov = new ScriptedProvider();
+        ChatResponse r1 = new ChatResponse();
+        ToolCall tc = new ToolCall();
+        tc.setId("c1");
+        tc.setName("reserve_expert");
+        tc.setArguments("{\"a\":\"王教授\",\"b\":\"周三上午\",\"c\":\"多余\"}");
+        r1.setToolCalls(List.of(tc));
+        prov.add(r1);
+
+        AgentOrchestrator orch = new AgentOrchestrator(prov, new ToolRegistry(List.of(tool)), store, props());
+        OrchestratorResult out = orch.run(List.of(new ChatMessage("user", "预约王教授", null, null)), "farmer", "u1", "s1");
+        assertTrue(out.needsConfirm());
+
+        ConfirmOutcome ok = orch.confirmAndExecute(out.getPendingId(), true, "u1",
+                Map.of("b", " 下周三下午 ", "c", ""));   // b 用户改了时间,c 清空
+        assertEquals(ConfirmOutcome.EXECUTED, ok.getStatus());
+        assertEquals(1, tool.executedArgs.size());
+        Map<String, Object> merged = tool.executedArgs.get(0);
+        assertEquals("王教授", merged.get("a"), "未编辑的存量参数保留");
+        assertEquals("下周三下午", merged.get("b"), "用户编辑值覆盖存量且去空白");
+        assertFalse(merged.containsKey("c"), "空串提交应删除该键");
+    }
+
+    @Test
+    void confirmPrecheckFailureKeepsPendingRetryable() {
+        // 预检(validate/preview)失败 → ERROR 且 pending 不消费,表单可改后重试;
+        // 重试带全参数 → EXECUTED。这是"表单保持可编辑"的后端契约
+        PendingActionStore store = new PendingActionStore(props());
+        FakeFormTool tool = new FakeFormTool();
+        ScriptedProvider prov = new ScriptedProvider();
+        ChatResponse r1 = new ChatResponse();
+        ToolCall tc = new ToolCall();
+        tc.setId("c1");
+        tc.setName("reserve_expert");
+        tc.setArguments("{\"a\":\"王教授\"}");   // 缺必填 b
+        r1.setToolCalls(List.of(tc));
+        prov.add(r1);
+
+        AgentOrchestrator orch = new AgentOrchestrator(prov, new ToolRegistry(List.of(tool)), store, props());
+        OrchestratorResult out = orch.run(List.of(new ChatMessage("user", "预约王教授", null, null)), "farmer", "u1", "s1");
+        assertTrue(out.needsConfirm());
+
+        ConfirmOutcome bad = orch.confirmAndExecute(out.getPendingId(), true, "u1", null);
+        assertEquals(ConfirmOutcome.ERROR, bad.getStatus());
+        assertTrue(bad.getText().contains("请填写期望时间"), "错误消息应含校验原因:" + bad.getText());
+        assertTrue(tool.executedArgs.isEmpty(), "预检失败不得执行");
+
+        // pending 未被消费:补全后同一张卡重试成功
+        ConfirmOutcome retry = orch.confirmAndExecute(out.getPendingId(), true, "u1", Map.of("b", "下周三下午"));
+        assertEquals(ConfirmOutcome.EXECUTED, retry.getStatus());
+        assertEquals(1, tool.executedArgs.size());
+        assertEquals("下周三下午", tool.executedArgs.get(0).get("b"));
     }
 }

@@ -45,19 +45,77 @@
             :class="['agent-msg', `agent-msg--${msg.role}`]"
           >
             <div class="agent-msg__content">{{ msg.content }}</div>
+            <!-- 表单卡(表单工具待确认):已提取信息预填,缺失槽位用户在表单里补 -->
+            <el-form
+              v-if="msg.form && msg.form.length && !msg.resolved"
+              :ref="el => setFormRef(msg, el)"
+              :model="msg.formModel"
+              :rules="msg.formRules"
+              label-position="top"
+              size="small"
+              class="agent-form"
+              @submit.prevent
+            >
+              <el-form-item
+                v-for="f in msg.form"
+                :key="f.key"
+                :label="f.label + (f.required ? '' : '(选填)')"
+                :prop="f.key"
+              >
+                <el-cascader
+                  v-if="f.type === 'region'"
+                  v-model="msg.formModel[f.key]"
+                  :options="regionOptions"
+                  :props="{ expandTrigger: 'hover', value: 'label', label: 'label' }"
+                  placeholder="请选择省/市/区"
+                  style="width: 100%"
+                  clearable
+                />
+                <el-select
+                  v-else-if="f.type === 'select'"
+                  v-model="msg.formModel[f.key]"
+                  placeholder="请选择"
+                  style="width: 100%"
+                  clearable
+                >
+                  <el-option v-for="o in f.options || []" :key="o.value" :label="o.label" :value="o.value" />
+                </el-select>
+                <el-input-number
+                  v-else-if="f.type === 'number'"
+                  v-model="msg.formModel[f.key]"
+                  :min="0"
+                  :controls="false"
+                  placeholder="请输入金额"
+                  style="width: 100%"
+                />
+                <el-switch v-else-if="f.type === 'switch'" v-model="msg.formModel[f.key]" />
+                <el-input
+                  v-else-if="f.type === 'textarea'"
+                  v-model="msg.formModel[f.key]"
+                  type="textarea"
+                  :rows="2"
+                  :placeholder="f.placeholder || ''"
+                />
+                <el-input v-else v-model="msg.formModel[f.key]" :placeholder="f.placeholder || ''" />
+                <div v-if="f.hint" class="agent-form__hint">{{ f.hint }}</div>
+              </el-form-item>
+            </el-form>
             <!-- 确认卡(写操作待确认且未处理) -->
             <div v-if="msg.needsConfirm && !msg.resolved" class="agent-confirm">
+              <div v-if="msg.confirmError" class="agent-form__error">{{ msg.confirmError }}</div>
               <el-button
                 type="primary"
                 size="small"
                 :loading="msg.confirming"
                 @click="handleConfirm(msg, true)"
-              >确认执行</el-button>
+                >确认执行</el-button
+              >
               <el-button
                 size="small"
                 :loading="msg.confirming"
                 @click="handleConfirm(msg, false)"
-              >取消</el-button>
+                >取消</el-button
+              >
             </div>
             <!-- 已处理标记 -->
             <div v-if="msg.needsConfirm && msg.resolved" class="agent-confirm__done">
@@ -112,8 +170,78 @@ import {
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { getAgentStatus, agentChat, agentConfirm, getAgentHistory } from '@/api/agent'
+import { regionData } from 'element-china-area-data'
 
 const userStore = useUserStore()
+
+// 表单卡的 el-form 实例集合(按 pendingId 索引),确认前先做必填校验
+const formRefs = {}
+// 中国省市区数据(完整版),与地址管理页同源
+const regionOptions = regionData
+
+function setFormRef(msg, el) {
+  if (el) formRefs[msg.pendingId] = el
+}
+
+/**
+ * 后端下发的表单字段列表 → 前端表单状态。
+ * switch 转 boolean、region 的"省 市 区"串拆成 cascader 路径数组、number 转数值;
+ * required 生成必填规则,purpose/repaymentSource 追加"不少于15字"(后端 validate 同口径)。
+ */
+function buildFormState(fields) {
+  const model = {}
+  const rules = {}
+  for (const f of fields) {
+    if (f.type === 'switch') {
+      model[f.key] = f.value === 'true' || f.value === true
+    } else if (f.type === 'region') {
+      model[f.key] = f.value && typeof f.value === 'string' && f.value.trim()
+        ? f.value.trim().split(/\s+/)
+        : []
+    } else if (f.type === 'number') {
+      const n = f.value !== null && f.value !== undefined && f.value !== '' ? Number(f.value) : NaN
+      model[f.key] = Number.isFinite(n) ? n : undefined
+    } else {
+      model[f.key] = f.value || ''
+    }
+    const rs = []
+    if (f.required && f.type !== 'switch') {
+      const isPick = f.type === 'region' || f.type === 'select'
+      rs.push({
+        required: true,
+        message: `请${isPick ? '选择' : '填写'}${f.label}`,
+        trigger: isPick ? 'change' : 'blur'
+      })
+    }
+    if (f.key === 'purpose' || f.key === 'repaymentSource') {
+      rs.push({ min: 15, message: `${f.label}不能少于15个字`, trigger: 'blur' })
+    }
+    if (rs.length) rules[f.key] = rs
+  }
+  return { model, rules }
+}
+
+/** 收集表单值为 confirm 的 args:region 拆回省/市/区,switch 转 "true"/"false",空值不传。 */
+function collectFormArgs(msg) {
+  const args = {}
+  for (const f of msg.form) {
+    const v = msg.formModel[f.key]
+    if (f.type === 'region') {
+      if (Array.isArray(v) && v.length >= 2) {
+        args.province = v[0]
+        args.city = v[1]
+        args.area = v[2] || ''
+      }
+    } else if (f.type === 'switch') {
+      args[f.key] = String(v === true)
+    } else if (f.type === 'number') {
+      if (v !== undefined && v !== null && v !== '') args[f.key] = String(v)
+    } else if (v !== null && v !== undefined && String(v).trim()) {
+      args[f.key] = String(v).trim()
+    }
+  }
+  return args
+}
 
 // ===== 显示控制 =====
 const isOpen = ref(false)
@@ -283,13 +411,17 @@ async function handleSend() {
         m.resolvedText = '已失效(发起了新请求)'
       }
     })
-    // 追加助手消息
+    // 追加助手消息(表单卡:字段预填进可编辑表单,缺失槽位用户补)
+    const formState = d.form && d.form.length ? buildFormState(d.form) : null
     messages.value.push({
       role: 'assistant',
       content: d.reply,
       needsConfirm: d.needsConfirm,
       pendingId: d.pendingId || null,
-      resolved: !d.needsConfirm
+      resolved: !d.needsConfirm,
+      form: formState ? d.form : null,
+      formModel: formState ? formState.model : null,
+      formRules: formState ? formState.rules : null
     })
   } catch (e) {
     messages.value.push({
@@ -313,16 +445,38 @@ const CONFIRM_STATUS_TEXT = {
   disabled: '智能助手已停用,操作未执行'
 }
 
-/** 确认/取消写操作 */
+/** 确认/取消写操作(表单卡先做必填校验,提交编辑值作为 args) */
 async function handleConfirm(msg, accept) {
+  let args
+  if (accept && msg.form && msg.form.length) {
+    const formRef = formRefs[msg.pendingId]
+    if (formRef) {
+      try {
+        await formRef.validate()
+      } catch (e) {
+        ElMessage.warning('请先补全表单中的必填项')
+        return
+      }
+    }
+    args = collectFormArgs(msg)
+  }
   msg.confirming = true
+  msg.confirmError = null
   try {
     const res = await agentConfirm({
       pendingId: msg.pendingId,
       accept: accept,
-      sessionId: sessionId.value
+      sessionId: sessionId.value,
+      args: accept ? args : undefined
     })
     const status = res.data.status || (res.data.success ? 'executed' : 'error')
+    // 校验未通过(pending 未被后端消费):表单卡保持可编辑并展示原因,改完可再提交;
+    // 执行失败(pending 已消费)则正常关闭卡片,重试需重新发起
+    if (status === 'error' && msg.form && msg.form.length
+        && typeof res.data.reply === 'string' && res.data.reply.includes('[校验未通过]')) {
+      msg.confirmError = res.data.reply
+      return
+    }
     msg.resolved = true
     msg.resolvedText = CONFIRM_STATUS_TEXT[status] || ('操作结束:' + status)
     // 追加执行结果消息
@@ -493,6 +647,7 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
   display: flex;
   gap: var(--spacing-2);
   padding: var(--spacing-1) 0;
+  flex-wrap: wrap;
 }
 .agent-confirm__done {
   font-size: var(--font-size-xs);
@@ -501,6 +656,36 @@ watch(() => userStore.isLoggedIn(), (loggedIn) => {
 .agent-confirm__hint {
   font-size: var(--font-size-xs);
   color: var(--color-text-tertiary);
+}
+
+/* 表单卡 */
+.agent-form {
+  width: 100%;
+  padding: var(--spacing-2) var(--spacing-3);
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-base);
+}
+.agent-form :deep(.el-form-item) {
+  margin-bottom: var(--spacing-2);
+}
+.agent-form :deep(.el-form-item__label) {
+  font-size: var(--font-size-xs);
+  padding-bottom: 2px;
+}
+.agent-form__hint {
+  width: 100%;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-tertiary);
+  line-height: 1.4;
+}
+.agent-form__error {
+  width: 100%;
+  font-size: var(--font-size-xs);
+  color: var(--color-danger, #f56c6c);
+  line-height: 1.4;
+  margin-bottom: var(--spacing-1);
+  word-break: break-all;
 }
 
 /* 加载态 */
